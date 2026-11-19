@@ -1006,6 +1006,26 @@ function reconcileTabularRowsAndAudit(params: {
         cleanNum = rawNum;
         cleanAmtStr = rawNum.toFixed(2);
         cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
+      } else if (
+        cleanNum === null &&
+        primaryAmountIdx === totalColIdx &&
+        qtyColIdx >= 0 &&
+        unitPriceColIdx >= 0
+      ) {
+        // Deterministically calculate quantity * unit_price for uncalculated Excel formulas (e.g., =F2*G2) or blank totals
+        const qtyMapping = schemaMappings[qtyColIdx];
+        const priceMapping = schemaMappings[unitPriceColIdx];
+        const qtyNum = parseNumericValue(
+          cleanRow[qtyMapping.normalizedHeader] || rawRow[qtyMapping.rawHeader]
+        );
+        const priceNum = parseNumericValue(
+          cleanRow[priceMapping.normalizedHeader] || rawRow[priceMapping.rawHeader]
+        );
+        if (qtyNum !== null && priceNum !== null) {
+          cleanNum = Number((qtyNum * priceNum).toFixed(2));
+          cleanAmtStr = cleanNum.toFixed(2);
+          cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
+        }
       } else if (cleanNum !== null) {
         cleanAmtStr = cleanNum.toFixed(2);
         cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
@@ -1013,6 +1033,9 @@ function reconcileTabularRowsAndAudit(params: {
 
       const rowCurrency =
         detectCurrencyCode(rawAmtStr) ||
+        (unitPriceColIdx >= 0
+          ? detectCurrencyCode(rawRow[schemaMappings[unitPriceColIdx].rawHeader])
+          : null) ||
         (existingCurrencyIdx >= 0
           ? detectCurrencyCode(rawRow[schemaMappings[existingCurrencyIdx].rawHeader])
           : null) ||

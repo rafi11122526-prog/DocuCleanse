@@ -48,14 +48,28 @@ const SERIES_PALETTE = [
 function parseNumericValue(raw: string | undefined): number | null {
   if (!raw) return null;
   const trimmed = raw.trim();
-  if (!trimmed || trimmed.startsWith('[ERROR') || trimmed === '[MISSING]') {
+  if (
+    !trimmed ||
+    trimmed.startsWith('=') ||
+    trimmed.startsWith('[ERROR') ||
+    trimmed === '[MISSING]' ||
+    trimmed.endsWith('%')
+  ) {
     return null;
   }
   const isParenNeg = /^\(.*\)$/.test(trimmed);
-  const cleaned = trimmed
+  let cleaned = trimmed
     .replace(/\b(USD|EUR|GBP|CAD|AUD|JPY|CHF|NZD|SGD|HKD|PKR|INR)\b/gi, '')
-    .replace(/(CA\$|AU\$|US\$|NZ\$|HK\$|S\$|C\$|A\$)/gi, '')
-    .replace(/[$,€£¥₹\s()]/g, '');
+    .replace(/(CA\$|AU\$|US\$|NZ\$|HK\$|S\$|C\$|A\$|Rs\.?)/gi, '')
+    .replace(/[$€£¥₹\s()]/g, '');
+
+  // Handle European decimals (e.g., 1.250,50 or 450,00) vs US thousand commas (1,250.50)
+  if (/^-?\d{1,3}(\.\d{3})*,\d{1,2}$/.test(cleaned) || /^-?\d+,\d{1,2}$/.test(cleaned)) {
+    cleaned = cleaned.replace(/\./g, '').replace(',', '.');
+  } else {
+    cleaned = cleaned.replace(/,/g, '');
+  }
+
   if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return null;
   const num = Number(cleaned);
   if (!Number.isFinite(num)) return null;
@@ -190,9 +204,11 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
 
       // 2. Numeric / Currency column check
       const numericMatches = nonEmpty.filter((v) => parseNumericValue(v) !== null).length;
+      const isRateOrPct = /tax[\s_-]?rate|\brate\b|_rate|pct|percent/.test(lower);
       const isCurrencyName =
-        lower === 'normalized_amount' ||
-        /amount|amt|total|price|cost|mrr|revenue|fee|tax|balance|spend|budget/.test(lower);
+        !isRateOrPct &&
+        (lower === 'normalized_amount' ||
+          /amount|amt|total|price|cost|mrr|revenue|fee|balance|spend|budget/.test(lower));
       if (
         lower !== 'currency_code' &&
         (mappedType === 'currency' ||
@@ -203,14 +219,18 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
         const priority =
           lower === 'normalized_amount'
             ? 100
-            : /total_amount|line_total|revenue|mrr/.test(lower)
-            ? 80
+            : /total[\s_-]?amount|line[\s_-]?total|net[\s_-]?total|grand[\s_-]?total|\btotal\b|revenue|mrr/.test(
+                lower
+              ) && !isRateOrPct
+            ? 85
+            : isCurrencyName && !/unit[\s_-]?price|unit[\s_-]?cost/.test(lower)
+            ? 70
             : isCurrencyName
-            ? 60
+            ? 50
             : 20;
         numericCols.push({
           header,
-          isCurrency: mappedType === 'currency' || isCurrencyName,
+          isCurrency: !isRateOrPct && (mappedType === 'currency' || isCurrencyName),
           priority,
         });
         continue;
@@ -260,9 +280,59 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
 
   // Executive KPIs (Total Revenue / Gross Inflow, Identified Leakage, Reconciliation Confidence)
   const executiveKpis = useMemo(() => {
+    const headers = job.cleanedHeaders;
+    const rawHeaders = job.rawHeaders;
+
+    const findHeader = (list: string[], regex: RegExp, exclude?: RegExp): string =>
+      list.find((h) => regex.test(h) && (!exclude || !exclude.test(h))) || '';
+
+    const normalizedAmtCol = headers.includes('normalized_amount') ? 'normalized_amount' : '';
+    const explicitTotalCol = findHeader(
+      headers,
+      /^(total[\s_-]?amount|line[\s_-]?total|net[\s_-]?total|grand[\s_-]?total|total|amount|revenue|monthly_recurring_revenue|mrr|balance)$/i,
+      /raw_amount|unit[\s_-]?price|tax|rate|qty|quantity/i
+    );
+    const partialTotalCol = findHeader(
+      headers,
+      /(total|amount|revenue|mrr|balance|subtotal|net_sales)/i,
+      /raw_amount|unit[\s_-]?price|tax|rate|qty|quantity/i
+    );
+
+    const qtyCol = findHeader(
+      headers,
+      /\b(qty|quantity|units)\b|qty_sold|quantity_sold|units_sold/i
+    );
+    const rawQtyCol = findHeader(
+      rawHeaders,
+      /\b(qty|quantity|units)\b|qty_sold|quantity_sold|units_sold/i
+    );
+    const unitPriceCol = findHeader(
+      headers,
+      /\b(unit[\s_-]?price|unit[\s_-]?cost|price)\b/i,
+      /total|tax|discount|rate/i
+    );
+    const rawUnitPriceCol = findHeader(
+      rawHeaders,
+      /\b(unit[\s_-]?price|unit[\s_-]?cost|price)\b/i,
+      /total|tax|discount|rate/i
+    );
+
+    const candidateTotalCols = Array.from(
+      new Set(
+        [
+          normalizedAmtCol,
+          job.auditMetadata?.primaryAmountColumn || '',
+          explicitTotalCol,
+          partialTotalCol,
+          detectedSchema.numericCols.find(
+            (n) => n.isCurrency && !/unit[\s_-]?price|unit[\s_-]?cost/i.test(n.header)
+          )?.header || '',
+        ].filter(Boolean)
+      )
+    );
+
     const primaryCol =
-      (job.cleanedHeaders.includes('normalized_amount') ? 'normalized_amount' : '') ||
-      job.auditMetadata?.primaryAmountColumn ||
+      candidateTotalCols[0] ||
       detectedSchema.numericCols.find((n) => n.isCurrency)?.header ||
       detectedSchema.numericCols[0]?.header ||
       '';
@@ -270,22 +340,72 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     let grossInflow = 0;
     let netTotal = 0;
     let negativeExposure = 0;
+    let computedInputSum = 0;
     const currencySet = new Set<string>(job.auditMetadata?.detectedCurrencies ?? []);
 
-    if (primaryCol) {
-      for (const row of job.cleanedRows) {
-        const val = parseNumericValue(row[primaryCol]);
-        if (val !== null) {
-          netTotal += val;
-          if (val > 0) {
-            grossInflow += val;
-          } else if (val < 0) {
-            negativeExposure += Math.abs(val);
-          }
+    const rowCount = Math.max(job.cleanedRows.length, job.rawRows.length);
+    for (let i = 0; i < rowCount; i++) {
+      const cleanRow = job.cleanedRows[i] || {};
+      const rawRow = job.rawRows[i] || {};
+
+      // 1. Try reading a valid normalized transaction total from candidate total columns
+      let rowAmount: number | null = null;
+      for (const col of candidateTotalCols) {
+        const parsed = parseNumericValue(cleanRow[col]);
+        if (parsed !== null) {
+          rowAmount = parsed;
+          break;
         }
-        const cur = String(row.currency_code ?? '').trim();
-        if (cur) currencySet.add(cur);
       }
+
+      // 2. Fallback or verify via (quantity * unit_price) when total_amount is missing/uncalculated/formula-error
+      const qtyVal =
+        (qtyCol ? parseNumericValue(cleanRow[qtyCol]) : null) ??
+        (rawQtyCol ? parseNumericValue(rawRow[rawQtyCol]) : null);
+      const unitPriceVal =
+        (unitPriceCol ? parseNumericValue(cleanRow[unitPriceCol]) : null) ??
+        (rawUnitPriceCol ? parseNumericValue(rawRow[rawUnitPriceCol]) : null);
+
+      if (qtyVal !== null && unitPriceVal !== null) {
+        const computedLine = Number((qtyVal * unitPriceVal).toFixed(2));
+        const rawAmtField = String(cleanRow.raw_amount ?? '').trim();
+        const wasUncalculatedOrZero =
+          rowAmount === null ||
+          (rowAmount === 0 &&
+            computedLine !== 0 &&
+            (!rawAmtField || rawAmtField.startsWith('=')));
+        if (wasUncalculatedOrZero) {
+          rowAmount = computedLine;
+        }
+      }
+
+      // 3. Final fallback to first numeric currency column if still null
+      if (rowAmount === null && primaryCol) {
+        rowAmount = parseNumericValue(cleanRow[primaryCol]);
+      }
+
+      if (rowAmount !== null) {
+        netTotal += rowAmount;
+        if (rowAmount > 0) {
+          grossInflow += rowAmount;
+        } else if (rowAmount < 0) {
+          negativeExposure += Math.abs(rowAmount);
+        }
+      }
+
+      // Track raw input sum for fallback variance display on legacy jobs
+      const rawTotalKey = findHeader(
+        rawHeaders,
+        /(total[\s_-]?amount|line[\s_-]?total|total|amount|revenue|mrr|balance)/i,
+        /unit[\s_-]?price|tax|rate/i
+      );
+      if (rawTotalKey) {
+        const rawNum = parseNumericValue(rawRow[rawTotalKey]);
+        if (rawNum !== null) computedInputSum += rawNum;
+      }
+
+      const cur = String(cleanRow.currency_code ?? '').trim();
+      if (cur) currencySet.add(cur);
     }
 
     // Fallback leakage calculation if auditMetadata isn't present on legacy jobs
@@ -316,13 +436,28 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     const confidenceScore =
       job.auditMetadata?.reconciliationConfidenceScore !== undefined
         ? job.auditMetadata.reconciliationConfidenceScore
-        : Number(Math.max(85, Math.min(100, ((totalCells - unresolvedCount) / totalCells) * 100)).toFixed(1));
+        : Number(
+            Math.max(85, Math.min(100, ((totalCells - unresolvedCount) / totalCells) * 100)).toFixed(1)
+          );
 
     const criticalFinancialCount = job.anomalies.filter((a) => a.severity === 'critical').length;
+    const roundedNet = Number(netTotal.toFixed(2));
+    const resolvedOutputSum =
+      job.auditMetadata && (job.auditMetadata.outputSum !== 0 || roundedNet === 0)
+        ? job.auditMetadata.outputSum
+        : roundedNet;
+    const resolvedInputSum =
+      job.auditMetadata && (job.auditMetadata.inputSum !== 0 || computedInputSum === 0)
+        ? job.auditMetadata.inputSum
+        : Number(computedInputSum.toFixed(2));
+    const resolvedVariance =
+      job.auditMetadata && (job.auditMetadata.outputSum !== 0 || roundedNet === 0)
+        ? job.auditMetadata.reconciledVariance
+        : Number((resolvedOutputSum - resolvedInputSum).toFixed(2));
 
     return {
       grossInflow: Number(grossInflow.toFixed(2)),
-      netTotal: Number(netTotal.toFixed(2)),
+      netTotal: roundedNet,
       leakageValue,
       confidenceScore,
       currencies: Array.from(currencySet),
@@ -331,9 +466,9 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
       rowsIngested: job.auditMetadata?.rowsIngested ?? job.rowCount,
       rowsCleaned: job.auditMetadata?.rowsCleaned ?? job.rowCount,
       rowChecksumMatch: job.auditMetadata?.rowChecksumMatch ?? true,
-      reconciledVariance: job.auditMetadata?.reconciledVariance ?? 0,
-      inputSum: job.auditMetadata?.inputSum ?? netTotal,
-      outputSum: job.auditMetadata?.outputSum ?? netTotal,
+      reconciledVariance: resolvedVariance,
+      inputSum: resolvedInputSum,
+      outputSum: resolvedOutputSum,
       timestampUtc: (() => {
         const rawTs = job.auditMetadata?.timestampUtc ?? job.createdAt;
         if (rawTs.endsWith(' UTC')) return rawTs;

@@ -667,7 +667,20 @@ async function runFallbackClean(file: File): Promise<{ job: CleanJob; quota: Quo
         const cleanedAmtStr = String(cleanObj[normAmtHeader] ?? '').trim();
 
         const rawNum = parseNumericLocal(rawAmtStr);
-        const cleanNum = parseNumericLocal(cleanedAmtStr);
+        let cleanNum = parseNumericLocal(cleanedAmtStr);
+        if (
+          cleanNum === null &&
+          primaryAmtIdx === totalColIdx &&
+          qtyColIdx >= 0 &&
+          unitPriceColIdx >= 0
+        ) {
+          const qtyNum = parseNumericLocal(rawObj[rawHeaders[qtyColIdx]]);
+          const priceNum = parseNumericLocal(rawObj[rawHeaders[unitPriceColIdx]]);
+          if (qtyNum !== null && priceNum !== null) {
+            cleanNum = Number((qtyNum * priceNum).toFixed(2));
+            cleanObj[normAmtHeader] = cleanNum.toFixed(2);
+          }
+        }
         if (rawNum !== null) inputSum += rawNum;
         if (cleanNum !== null) outputSum += cleanNum;
 

@@ -53,6 +53,60 @@ export function AnomalyCards({ job }: AnomalyCardsProps) {
     if (job.auditMetadata) {
       return job.auditMetadata;
     }
+    const parseNum = (val: string | undefined): number | null => {
+      if (!val) return null;
+      const t = val.trim();
+      if (!t || t.startsWith('=') || t.startsWith('[ERROR') || t === '[MISSING]' || t.endsWith('%')) {
+        return null;
+      }
+      const neg = /^\(.*\)$/.test(t);
+      const c = t
+        .replace(/\b(USD|EUR|GBP|CAD|AUD|JPY|CHF|NZD|SGD|HKD|PKR|INR)\b/gi, '')
+        .replace(/(CA\$|AU\$|US\$|NZ\$|HK\$|S\$|C\$|A\$|Rs\.?)/gi, '')
+        .replace(/[$,€£¥₹\s()]/g, '');
+      if (!/^-?\d+(\.\d+)?$/.test(c)) return null;
+      const n = Number(c);
+      return Number.isFinite(n) ? (neg ? -Math.abs(n) : n) : null;
+    };
+
+    const totalCol =
+      job.cleanedHeaders.find((h) => h === 'normalized_amount') ||
+      job.cleanedHeaders.find(
+        (h) =>
+          /(total[\s_-]?amount|line[\s_-]?total|total|amount|revenue|mrr|balance)/i.test(h) &&
+          !/raw_amount|unit[\s_-]?price|tax|rate/i.test(h)
+      ) ||
+      '';
+    const rawTotalCol =
+      job.rawHeaders.find(
+        (h) =>
+          /(total[\s_-]?amount|line[\s_-]?total|total|amount|revenue|mrr|balance)/i.test(h) &&
+          !/unit[\s_-]?price|tax|rate/i.test(h)
+      ) || '';
+    const qtyCol = job.cleanedHeaders.find((h) => /\b(qty|quantity|units)\b|qty_sold/i.test(h)) || '';
+    const priceCol =
+      job.cleanedHeaders.find(
+        (h) => /\b(unit[\s_-]?price|unit[\s_-]?cost|price)\b/i.test(h) && !/total|tax|rate/i.test(h)
+      ) || '';
+
+    let inSum = 0;
+    let outSum = 0;
+    for (let i = 0; i < job.cleanedRows.length; i++) {
+      const cRow = job.cleanedRows[i] || {};
+      const rRow = job.rawRows[i] || {};
+      if (rawTotalCol) {
+        const rn = parseNum(rRow[rawTotalCol]);
+        if (rn !== null) inSum += rn;
+      }
+      let cn = totalCol ? parseNum(cRow[totalCol]) : null;
+      if (cn === null && qtyCol && priceCol) {
+        const q = parseNum(cRow[qtyCol]);
+        const p = parseNum(cRow[priceCol]);
+        if (q !== null && p !== null) cn = Number((q * p).toFixed(2));
+      }
+      if (cn !== null) outSum += cn;
+    }
+
     const fallbackUtc =
       (job.createdAt ? new Date(job.createdAt) : new Date())
         .toISOString()
@@ -64,10 +118,10 @@ export function AnomalyCards({ job }: AnomalyCardsProps) {
       rowsIngested: job.rawRows.length || job.rowCount,
       rowsCleaned: job.cleanedRows.length || job.rowCount,
       rowChecksumMatch: (job.rawRows.length || job.rowCount) === (job.cleanedRows.length || job.rowCount),
-      inputSum: 0,
-      outputSum: 0,
-      reconciledVariance: 0,
-      primaryAmountColumn: '',
+      inputSum: Number(inSum.toFixed(2)),
+      outputSum: Number(outSum.toFixed(2)),
+      reconciledVariance: Number((outSum - inSum).toFixed(2)),
+      primaryAmountColumn: totalCol,
       detectedCurrencies: [] as string[],
       leakageRecoveredValue: 0,
       reconciliationConfidenceScore: 99.0,
