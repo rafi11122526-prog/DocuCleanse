@@ -181,7 +181,7 @@ export function DataComparisonTable({
             ) : (
               <Lock className="h-3.5 w-3.5 text-amber-300" />
             )}
-            <span>{exportingFormat === 'pdf' ? 'Rendering PDF...' : 'Summary PDF'}</span>
+            <span>{exportingFormat === 'pdf' ? 'Rendering PDF...' : 'Pre-Audit PDF'}</span>
           </button>
         </div>
       </div>
@@ -255,7 +255,7 @@ export function DataComparisonTable({
                           const normH = job.cleanedHeaders[cIdx] || rawH;
                           const diff = diffLookup.get(`${rIdx}:${normH}`);
                           const val = row[rawH] ?? '';
-                          const isFormulaErr = /^#(REF!|DIV\/0!|VALUE!|NAME\?|N\/A|NUM!)/i.test(
+                          const isFormulaErr = /^=?#(REF!|DIV\/0!|VALUE!|NAME\?|N\/A|NUM!)/i.test(
                             val.trim()
                           );
 

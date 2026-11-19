@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import express from 'express';
@@ -100,6 +101,7 @@ async function startServer() {
           return;
         }
 
+        const fileHashSha256 = crypto.createHash('sha256').update(file.buffer).digest('hex');
         const parsed = parseUploadedFile(file.buffer, file.originalname, file.mimetype);
 
         let job;
@@ -115,12 +117,14 @@ async function startServer() {
             userId,
             fileName: file.originalname,
             parsed,
+            fileHashSha256,
           });
         } else {
           job = await cleanMultimodalDocument({
             userId,
             fileName: file.originalname,
             parsed,
+            fileHashSha256,
           });
         }
 
@@ -184,6 +188,20 @@ async function startServer() {
 
       const baseName = path.basename(job.fileName, path.extname(job.fileName)).replace(/[^a-zA-Z0-9_-]/g, '_');
 
+      // Attach Institutional Audit Trail & Compliance HTTP Headers to every export
+      if (job.auditMetadata) {
+        res.setHeader('X-DocuCleanse-SHA256', job.auditMetadata.fileHashSha256);
+        res.setHeader('X-DocuCleanse-Timestamp-UTC', job.auditMetadata.timestampUtc);
+        res.setHeader(
+          'X-DocuCleanse-Row-Checksum',
+          `${job.auditMetadata.rowsIngested}/${job.auditMetadata.rowsCleaned}:${job.auditMetadata.rowChecksumMatch ? 'VERIFIED' : 'MISMATCH'}`
+        );
+        res.setHeader(
+          'X-DocuCleanse-Reconciled-Variance',
+          `input=${job.auditMetadata.inputSum.toFixed(2)};output=${job.auditMetadata.outputSum.toFixed(2)};delta=${job.auditMetadata.reconciledVariance.toFixed(2)}`
+        );
+      }
+
       if (format === 'csv') {
         const buffer = generateCsvBuffer(job);
         logExportAction({
@@ -230,7 +248,7 @@ async function startServer() {
           action: 'export_pdf',
         });
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="${baseName}_audit_report.pdf"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${baseName}_pre_audit_certificate.pdf"`);
         res.send(buffer);
         return;
       }

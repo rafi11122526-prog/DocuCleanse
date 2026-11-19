@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import type {
   AnomalyItem,
+  AuditMetadata,
   CellDiff,
   CleanJobRecord,
   DocumentCategory,
@@ -122,7 +123,7 @@ const TABULAR_RESPONSE_SCHEMA = {
   properties: {
     documentCategory: {
       type: Type.STRING,
-      description: 'One of: transactions, receipt, client_roster, invoice, general_table',
+      description: 'One of: transactions, client_roster, invoice, general_table (NEVER receipt for tabular CSV/XLSX files)',
     },
     executiveSummary: {
       type: Type.STRING,
@@ -189,7 +190,7 @@ const SCHEMA_RULE_RESPONSE_SCHEMA = {
   properties: {
     documentCategory: {
       type: Type.STRING,
-      description: 'One of: transactions, receipt, client_roster, invoice, general_table',
+      description: 'One of: transactions, client_roster, invoice, general_table (NEVER receipt for tabular CSV/XLSX files)',
     },
     executiveSummary: {
       type: Type.STRING,
@@ -331,7 +332,7 @@ function inferChangeType(
   cleanedVal: string
 ): CellDiff['changeType'] {
   const lower = columnName.toLowerCase();
-  if (/^#(REF!|DIV\/0!|VALUE!|NAME\?|N\/A|NUM!|NULL!|SPILL!|CALC!)/i.test(rawVal.trim())) {
+  if (/^=?#(REF!|DIV\/0!|VALUE!|NAME\?|N\/A|NUM!|NULL!|SPILL!|CALC!)/i.test(rawVal.trim())) {
     return 'formula_error';
   }
   if (lower.includes('date') || lower.includes('time') || /\d{1,4}[\/\-.]\d{1,2}[\/\-.]\d{1,4}/.test(rawVal)) {
@@ -373,6 +374,11 @@ function sanitizeCategory(cat: string): DocumentCategory {
     : 'general_table';
 }
 
+function sanitizeTabularCategory(cat: string): DocumentCategory {
+  const sanitized = sanitizeCategory(cat);
+  return sanitized === 'receipt' ? 'transactions' : sanitized;
+}
+
 function sanitizeSeverity(sev: string): AnomalyItem['severity'] {
   if (sev === 'critical' || sev === 'warning' || sev === 'fixed') return sev;
   return 'warning';
@@ -407,10 +413,14 @@ async function callWithRetry<T>(
   }
 }
 
-const FORMULA_TOKEN_REGEX = /^#(REF!|DIV\/0!|VALUE!|NAME\?|N\/A|NUM!|NULL!|SPILL!|CALC!)$/i;
+const FORMULA_TOKEN_REGEX = /^=?#(REF!|DIV\/0!|VALUE!|NAME\?|N\/A|NUM!|NULL!|SPILL!|CALC!)$/i;
 const MAX_DETAILED_ANOMALIES = 250;
 const MAX_TRACKED_CELL_DIFFS = 5000;
 const DETERMINISTIC_CHUNK_SIZE = 2000;
+
+function stripFormulaLeadingEquals(token: string): string {
+  return token.trim().replace(/^=/, '').toUpperCase();
+}
 
 function normalizeDateDeterministic(
   rawVal: string,
@@ -418,7 +428,7 @@ function normalizeDateDeterministic(
 ): { value: string; warning?: string } {
   const s = rawVal.trim();
   if (!s) return { value: '' };
-  if (FORMULA_TOKEN_REGEX.test(s)) return { value: `[ERROR: ${s.toUpperCase()}]` };
+  if (FORMULA_TOKEN_REGEX.test(s)) return { value: `[ERROR: ${stripFormulaLeadingEquals(s)}]` };
 
   // Already ISO YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return { value: s };
@@ -481,12 +491,14 @@ function normalizeCurrencyOrNumberDeterministic(
 ): { value: string; warning?: string } {
   const s = rawVal.trim();
   if (!s) return { value: '' };
-  if (FORMULA_TOKEN_REGEX.test(s)) return { value: `[ERROR: ${s.toUpperCase()}]` };
+  if (FORMULA_TOKEN_REGEX.test(s)) return { value: `[ERROR: ${stripFormulaLeadingEquals(s)}]` };
 
   const isAccountingNeg = /^\(.*\)$/.test(s);
   let cleaned = s
+    .replace(/\b(CA|AU|US|NZ|HK|SG)\$/gi, '')
+    .replace(/(?:^|[\s(])(C|A)\$/gi, '')
     .replace(/[$€£¥₹₩₽]/g, '')
-    .replace(/\b(USD|EUR|GBP|CAD|AUD|JPY|INR|PKR|AED|SAR|CHF|RS\.?)\b/gi, '')
+    .replace(/\b(USD|EUR|GBP|CAD|AUD|NZD|JPY|INR|PKR|AED|SAR|CHF|RS\.?)\b/gi, '')
     .replace(/[()\s]/g, '');
 
   const hasComma = cleaned.includes(',');
@@ -582,7 +594,7 @@ function normalizeStatusDeterministic(rawVal: string): string {
 function normalizeTextDeterministic(rawVal: string): string {
   const trimmed = rawVal.trim().replace(/\s+/g, ' ');
   if (FORMULA_TOKEN_REGEX.test(trimmed)) {
-    return `[ERROR: ${trimmed.toUpperCase()}]`;
+    return `[ERROR: ${stripFormulaLeadingEquals(trimmed)}]`;
   }
   return trimmed;
 }
@@ -597,11 +609,676 @@ function fallbackSnakeHeader(raw: string): string {
   );
 }
 
+function detectCurrencyCode(rawVal: string | undefined): string | null {
+  if (!rawVal) return null;
+  const s = String(rawVal).trim();
+  if (!s) return null;
+  // Check qualified dollar prefixes & explicit ISO-4217 codes BEFORE bare "$"
+  if (/\bCAD\b|CA\$|(?:^|[\s(-])C\$/i.test(s)) return 'CAD';
+  if (/\bAUD\b|AU\$|(?:^|[\s(-])A\$/i.test(s)) return 'AUD';
+  if (/\bNZD\b|NZ\$/i.test(s)) return 'NZD';
+  if (/£|\bGBP\b/i.test(s)) return 'GBP';
+  if (/€|\bEUR\b/i.test(s)) return 'EUR';
+  if (/\bUSD\b|US\$|\$/i.test(s)) return 'USD';
+  if (/¥|\bJPY\b/i.test(s)) return 'JPY';
+  if (/\bCHF\b/i.test(s)) return 'CHF';
+  if (/₹|\bINR\b/i.test(s)) return 'INR';
+  if (/\bPKR\b|\bRs\.?\b/i.test(s)) return 'PKR';
+  if (/\bAED\b/i.test(s)) return 'AED';
+  if (/\bSAR\b/i.test(s)) return 'SAR';
+  return null;
+}
+
+function parseNumericValue(val: string | undefined): number | null {
+  if (val === undefined || val === null) return null;
+  const s = String(val).trim();
+  if (!s || FORMULA_TOKEN_REGEX.test(s) || /^\[ERROR:/i.test(s)) return null;
+
+  const isAccountingNeg = /^\(.*\)$/.test(s);
+  let cleaned = s
+    .replace(/\b(CA|AU|US|NZ|HK|SG)\$/gi, '')
+    .replace(/(?:^|[\s(])(C|A)\$/gi, '')
+    .replace(/[$€£¥₹₩₽%]/g, '')
+    .replace(/\b(USD|EUR|GBP|CAD|AUD|NZD|JPY|INR|PKR|AED|SAR|CHF|RS\.?)\b/gi, '')
+    .replace(/[()\s]/g, '');
+
+  const hasComma = cleaned.includes(',');
+  const hasDot = cleaned.includes('.');
+
+  if (hasComma && hasDot) {
+    if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
+      cleaned = cleaned.replace(/\./g, '').replace(',', '.');
+    } else {
+      cleaned = cleaned.replace(/,/g, '');
+    }
+  } else if (hasComma) {
+    if (/^-?\d+,\d{1,2}$/.test(cleaned)) {
+      cleaned = cleaned.replace(',', '.');
+    } else {
+      cleaned = cleaned.replace(/,/g, '');
+    }
+  }
+
+  if (!cleaned) return null;
+  const num = Number(cleaned);
+  if (!Number.isFinite(num)) return null;
+  return isAccountingNeg ? -Math.abs(num) : num;
+}
+
+function inferDetectedTypeFromHeader(
+  rawHeader: string,
+  normHeader: string,
+  candidateType?: SchemaMapping['detectedType']
+): SchemaMapping['detectedType'] {
+  const combined = `${rawHeader} ${normHeader}`.toLowerCase();
+  if (candidateType && ['date', 'currency', 'phone', 'email', 'text', 'number', 'status'].includes(candidateType)) {
+    // Still upgrade generic 'text' if header unambiguously indicates date/phone/email
+    if (candidateType === 'text') {
+      if (/\bdate\b|_date|^dt$/i.test(combined)) return 'date';
+      if (/(phone|tel|mobile|whatsapp)/i.test(combined)) return 'phone';
+      if (/email|e-mail/i.test(combined)) return 'email';
+    }
+    return candidateType;
+  }
+  if (/\bdate\b|_date|^dt$/i.test(combined)) return 'date';
+  if (/(phone|tel|mobile|whatsapp)/i.test(combined)) return 'phone';
+  if (/email|e-mail/i.test(combined)) return 'email';
+  if (/status|state/i.test(combined)) return 'status';
+  if (/(amount|price|total|cost|revenue|fee|mrr|subtotal)/i.test(combined) && !/tax.*rate|%/i.test(combined)) {
+    return 'currency';
+  }
+  if (/(qty|quantity|units|count|rate|tax|pct|%)/i.test(combined)) return 'number';
+  return 'text';
+}
+
+function alignSchemaMappings(
+  rawHeaders: string[],
+  aiMappings: Array<{
+    rawHeader: string;
+    normalizedHeader: string;
+    detectedType?: SchemaMapping['detectedType'];
+    reason?: string;
+  }>,
+  defaultReason: string
+): SchemaMapping[] {
+  const byExact = new Map<string, (typeof aiMappings)[number]>();
+  const byLower = new Map<string, (typeof aiMappings)[number]>();
+
+  for (const m of aiMappings || []) {
+    if (m.rawHeader) {
+      byExact.set(m.rawHeader, m);
+      byLower.set(m.rawHeader.trim().toLowerCase(), m);
+    }
+  }
+
+  const usedNormHeaders = new Map<string, number>();
+  return rawHeaders.map((rawHeader, idx) => {
+    const matched =
+      byExact.get(rawHeader) ||
+      byLower.get(rawHeader.trim().toLowerCase()) ||
+      (aiMappings.length === rawHeaders.length ? aiMappings[idx] : undefined);
+
+    const baseNorm =
+      matched?.normalizedHeader && matched.normalizedHeader.trim().length > 0
+        ? fallbackSnakeHeader(matched.normalizedHeader)
+        : fallbackSnakeHeader(rawHeader);
+    const count = usedNormHeaders.get(baseNorm) ?? 0;
+    usedNormHeaders.set(baseNorm, count + 1);
+    const uniqueNorm = count === 0 ? baseNorm : `${baseNorm}_${count + 1}`;
+
+    return {
+      rawHeader,
+      normalizedHeader: uniqueNorm,
+      detectedType: inferDetectedTypeFromHeader(rawHeader, uniqueNorm, matched?.detectedType),
+      reason: matched?.reason || defaultReason,
+    };
+  });
+}
+
+function reconcileTabularRowsAndAudit(params: {
+  parsed: ParsedTabularInput;
+  schemaMappings: SchemaMapping[];
+  cleanedRows: Record<string, string>[];
+  anomalies: AnomalyItem[];
+  dateFormatHint?: DetectedPatternRules['dateFormatHint'];
+  fileHashSha256?: string;
+  timestampUtc?: string;
+}): {
+  cleanedHeaders: string[];
+  cleanedRows: Record<string, string>[];
+  schemaMappings: SchemaMapping[];
+  anomalies: AnomalyItem[];
+  cellDiffs: CellDiff[];
+  totalNormalizedCells: number;
+  auditMetadata: AuditMetadata;
+} {
+  const { parsed, schemaMappings, cleanedRows, dateFormatHint = 'AUTO' } = params;
+  const baseCleanedHeaders = schemaMappings.map((m) => m.normalizedHeader);
+  const timestampUtc = params.timestampUtc || new Date().toISOString();
+  const fileHashSha256 =
+    params.fileHashSha256 ||
+    crypto
+      .createHash('sha256')
+      .update(JSON.stringify({ headers: parsed.headers, rows: parsed.rows }))
+      .digest('hex');
+
+  // Detect key column roles across both raw and normalized headers
+  const idColIdx = schemaMappings.findIndex(
+    (m) =>
+      /^(txn|trans|transaction|order|inv|invoice|record)?[_\s-]?id$/i.test(m.rawHeader.trim()) ||
+      /^(txn|trans|transaction|order|inv|invoice|record)?_?id$/i.test(m.normalizedHeader)
+  );
+  const qtyColIdx = schemaMappings.findIndex((m) =>
+    /\b(qty|quantity|units)\b|qty_sold|units_sold/i.test(`${m.rawHeader} ${m.normalizedHeader}`)
+  );
+  const unitPriceColIdx = schemaMappings.findIndex(
+    (m) =>
+      /\b(unit[\s_-]?price|unit[\s_-]?cost|price)\b/i.test(`${m.rawHeader} ${m.normalizedHeader}`) &&
+      !/total|tax|discount/i.test(`${m.rawHeader} ${m.normalizedHeader}`)
+  );
+  const totalColIdx = schemaMappings.findIndex(
+    (m) =>
+      /\b(total[\s_-]?amount|line[\s_-]?total|net[\s_-]?total|total|amount|balance|mrr|revenue)\b/i.test(
+        `${m.rawHeader} ${m.normalizedHeader}`
+      ) && !/unit[\s_-]?price|tax/i.test(`${m.rawHeader} ${m.normalizedHeader}`)
+  );
+  const primaryAmountIdx =
+    totalColIdx >= 0
+      ? totalColIdx
+      : schemaMappings.findIndex((m) => m.detectedType === 'currency');
+  const existingCurrencyIdx = schemaMappings.findIndex((m) =>
+    /\b(currency|curr|ccy|currency_code)\b/i.test(`${m.rawHeader} ${m.normalizedHeader}`)
+  );
+  const fxRateColIdx = schemaMappings.findIndex((m) =>
+    /\b(fx[\s_-]?rate|exchange[\s_-]?rate|conversion[\s_-]?rate)\b/i.test(
+      `${m.rawHeader} ${m.normalizedHeader}`
+    )
+  );
+
+  const dateColIndices = new Set<number>();
+  const phoneColIndices = new Set<number>();
+  schemaMappings.forEach((m, idx) => {
+    const combined = `${m.rawHeader} ${m.normalizedHeader}`.toLowerCase();
+    if (m.detectedType === 'date' || /\bdate\b|_date|^dt$/i.test(combined)) {
+      dateColIndices.add(idx);
+    }
+    if (m.detectedType === 'phone' || /(phone|tel|mobile|whatsapp)/i.test(combined)) {
+      phoneColIndices.add(idx);
+    }
+  });
+
+  // Pre-scan currencies across primary monetary column (and currency column if present)
+  const currencyCounts = new Map<string, number>();
+  if (primaryAmountIdx >= 0) {
+    const rawAmtHeader = schemaMappings[primaryAmountIdx].rawHeader;
+    const rawCurrHeader =
+      existingCurrencyIdx >= 0 ? schemaMappings[existingCurrencyIdx].rawHeader : null;
+    for (const row of parsed.rows) {
+      const code =
+        detectCurrencyCode(row[rawAmtHeader]) ||
+        (rawCurrHeader ? detectCurrencyCode(row[rawCurrHeader]) : null);
+      if (code) {
+        currencyCounts.set(code, (currencyCounts.get(code) ?? 0) + 1);
+      }
+    }
+  }
+  const detectedCurrencies = Array.from(currencyCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([code]) => code);
+  const dominantCurrency = detectedCurrencies[0] || 'USD';
+  const hasExplicitMultiCurrency = detectedCurrencies.length >= 2;
+  const shouldEmitLedgerCurrencyColumns = primaryAmountIdx >= 0;
+
+  // Index formula errors detected by parser by rowIndex + rawHeader
+  const formulaErrorMap = new Map<string, ParsedTabularInput['formulaErrors'][number]>();
+  for (const fe of parsed.formulaErrors) {
+    formulaErrorMap.set(`${fe.rowIndex}:${fe.column}`, fe);
+  }
+
+  let reconciledAnomalies: AnomalyItem[] = [...params.anomalies];
+  const highPriorityFinancialAlerts: AnomalyItem[] = [];
+  const criticalFormulaAnomalies: AnomalyItem[] = [];
+  const warningAnomaliesToAdd: AnomalyItem[] = [];
+
+  let inputSum = 0;
+  let outputSum = 0;
+  let leakageRecoveredValue = 0;
+  const fxRates: Array<{ rIdx: number; rowPrefix: string; rawVal: string; val: number }> = [];
+
+  for (let rIdx = 0; rIdx < parsed.rows.length; rIdx++) {
+    const rawRow = parsed.rows[rIdx];
+    let cleanRow = cleanedRows[rIdx];
+    if (!cleanRow) {
+      cleanRow = {};
+      cleanedRows[rIdx] = cleanRow;
+    }
+
+    // Ensure every mapped column exists on cleanRow
+    for (let cIdx = 0; cIdx < schemaMappings.length; cIdx++) {
+      const m = schemaMappings[cIdx];
+      if (cleanRow[m.normalizedHeader] === undefined) {
+        cleanRow[m.normalizedHeader] = String(rawRow[m.rawHeader] ?? '');
+      }
+    }
+
+    const txnLabel =
+      idColIdx >= 0
+        ? String(
+            cleanRow[baseCleanedHeaders[idColIdx]] || rawRow[schemaMappings[idColIdx].rawHeader] || ''
+          ).trim()
+        : '';
+    const rowPrefix = txnLabel ? `Row ${rIdx + 1} (${txnLabel})` : `Row ${rIdx + 1}`;
+    let rowLeakageCounted = false;
+
+    // 1. Guarantee ISO-8601 (YYYY-MM-DD) dates across all rows
+    for (const cIdx of dateColIndices) {
+      const m = schemaMappings[cIdx];
+      const rawVal = String(rawRow[m.rawHeader] ?? '').trim();
+      const curVal = String(cleanRow[m.normalizedHeader] ?? '').trim();
+      if (!rawVal || FORMULA_TOKEN_REGEX.test(rawVal)) continue;
+
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(curVal)) {
+        const fromCur = curVal ? normalizeDateDeterministic(curVal, dateFormatHint) : null;
+        if (fromCur && /^\d{4}-\d{2}-\d{2}$/.test(fromCur.value)) {
+          cleanRow[m.normalizedHeader] = fromCur.value;
+        } else {
+          const fromRaw = normalizeDateDeterministic(rawVal, dateFormatHint);
+          if (/^\d{4}-\d{2}-\d{2}$/.test(fromRaw.value)) {
+            cleanRow[m.normalizedHeader] = fromRaw.value;
+          }
+        }
+      }
+    }
+
+    // 2. Guarantee phone normalization across all rows
+    for (const cIdx of phoneColIndices) {
+      const m = schemaMappings[cIdx];
+      const rawVal = String(rawRow[m.rawHeader] ?? '').trim();
+      const curVal = String(cleanRow[m.normalizedHeader] ?? '').trim();
+      if (!rawVal || FORMULA_TOKEN_REGEX.test(rawVal)) continue;
+
+      const looksUnformatted =
+        !curVal ||
+        /[().\s]/.test(curVal) ||
+        (/^\d{10,11}$/.test(curVal) && !curVal.startsWith('+'));
+      if (looksUnformatted) {
+        const normalized = normalizePhoneDeterministic(curVal || rawVal);
+        if (!normalized.warning && normalized.value) {
+          cleanRow[m.normalizedHeader] = normalized.value;
+        }
+      }
+    }
+
+    // 3. Detect & auto-calculate formula errors (=#REF!, =#DIV/0!, =#VALUE!, etc.)
+    for (let cIdx = 0; cIdx < schemaMappings.length; cIdx++) {
+      const m = schemaMappings[cIdx];
+      const rawVal = String(rawRow[m.rawHeader] ?? '').trim();
+      const curVal = String(cleanRow[m.normalizedHeader] ?? '').trim();
+      const parserFe = formulaErrorMap.get(`${rIdx}:${m.rawHeader}`);
+
+      const isFormulaErr =
+        Boolean(parserFe) ||
+        FORMULA_TOKEN_REGEX.test(rawVal) ||
+        FORMULA_TOKEN_REGEX.test(curVal) ||
+        /^\[ERROR:\s*#/i.test(curVal);
+
+      if (!isFormulaErr) continue;
+
+      const errorToken =
+        parserFe?.errorToken ||
+        (FORMULA_TOKEN_REGEX.test(rawVal)
+          ? stripFormulaLeadingEquals(rawVal)
+          : FORMULA_TOKEN_REGEX.test(curVal)
+          ? stripFormulaLeadingEquals(curVal)
+          : curVal.replace(/^\[ERROR:\s*|\]$/gi, '').trim().toUpperCase()) ||
+        '#ERROR!';
+
+      const rawDisplay = rawVal || parserFe?.formula || errorToken;
+      const cellAddr = parserFe?.cellAddress;
+      const location = `${rowPrefix}, ${m.normalizedHeader}${cellAddr ? ` (${cellAddr})` : ''}`;
+
+      const matchesRowIndex = (text: string): boolean => {
+        const lower = text.toLowerCase();
+        if (txnLabel && lower.includes(txnLabel.toLowerCase())) return true;
+        if (cellAddr && lower.includes(cellAddr.toLowerCase())) return true;
+        if (new RegExp(`\\brow\\s*${rIdx + 1}\\b`, 'i').test(lower)) return true;
+        if (new RegExp(`\\brow[\\s_]?index\\s*[:#]?\\s*${rIdx}\\b`, 'i').test(lower)) return true;
+        return false;
+      };
+
+      // Remove any stale/duplicate Gemini anomaly for this exact formula error cell
+      reconciledAnomalies = reconciledAnomalies.filter((a) => {
+        const matchesRow = matchesRowIndex(`${a.location} ${a.explanation}`);
+        const matchesErr =
+          a.category.toLowerCase().includes('formula') ||
+          a.rawValue.toUpperCase().includes(errorToken);
+        return !(matchesRow && matchesErr);
+      });
+
+      let autoCalculated: string | null = null;
+      let calcExplanation = `Critical spreadsheet formula error (${rawDisplay}) detected in "${m.rawHeader}".`;
+
+      if (cIdx === totalColIdx && qtyColIdx >= 0 && unitPriceColIdx >= 0) {
+        const qtyMapping = schemaMappings[qtyColIdx];
+        const priceMapping = schemaMappings[unitPriceColIdx];
+        const qtyNum = parseNumericValue(
+          cleanRow[qtyMapping.normalizedHeader] || rawRow[qtyMapping.rawHeader]
+        );
+        const priceNum = parseNumericValue(
+          cleanRow[priceMapping.normalizedHeader] || rawRow[priceMapping.rawHeader]
+        );
+
+        if (qtyNum !== null && priceNum !== null) {
+          const calcNum = qtyNum * priceNum;
+          autoCalculated = calcNum.toFixed(2);
+          cleanRow[m.normalizedHeader] = autoCalculated;
+          leakageRecoveredValue += Math.abs(calcNum);
+          rowLeakageCounted = true;
+          calcExplanation = `Critical spreadsheet formula error (${rawDisplay}) detected in "${m.rawHeader}". Auto-calculated using (${qtyMapping.rawHeader} × ${priceMapping.rawHeader}): ${qtyNum} × ${priceNum.toFixed(2)} = ${autoCalculated}.`;
+        }
+      }
+
+      if (!autoCalculated) {
+        cleanRow[m.normalizedHeader] = `[ERROR: ${errorToken}]`;
+      }
+
+      criticalFormulaAnomalies.push({
+        id: `anom_fe_${rIdx}_${cIdx}_${crypto.randomUUID().slice(0, 6)}`,
+        severity: 'critical',
+        category: 'Formula Error',
+        location,
+        rawValue: rawDisplay,
+        suggestedOrFixedValue: autoCalculated ?? '[Manual Review Required]',
+        explanation: calcExplanation,
+      });
+    }
+
+    // 4. Multi-Currency Ledger Normalization (raw_amount, normalized_amount, currency_code) + Variance & Negative Balance Alerts
+    if (shouldEmitLedgerCurrencyColumns && primaryAmountIdx >= 0) {
+      const amtMapping = schemaMappings[primaryAmountIdx];
+      const rawAmtStr = String(rawRow[amtMapping.rawHeader] ?? '').trim();
+      let cleanAmtStr = String(cleanRow[amtMapping.normalizedHeader] ?? '').trim();
+
+      const rawNum = parseNumericValue(rawAmtStr);
+      let cleanNum = parseNumericValue(cleanAmtStr);
+
+      if (cleanNum === null && rawNum !== null) {
+        cleanNum = rawNum;
+        cleanAmtStr = rawNum.toFixed(2);
+        cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
+      } else if (cleanNum !== null) {
+        cleanAmtStr = cleanNum.toFixed(2);
+        cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
+      }
+
+      const rowCurrency =
+        detectCurrencyCode(rawAmtStr) ||
+        (existingCurrencyIdx >= 0
+          ? detectCurrencyCode(rawRow[schemaMappings[existingCurrencyIdx].rawHeader])
+          : null) ||
+        dominantCurrency;
+
+      cleanRow['raw_amount'] = rawAmtStr;
+      cleanRow['normalized_amount'] = cleanNum !== null ? cleanNum.toFixed(2) : cleanAmtStr;
+      cleanRow['currency_code'] = rowCurrency;
+
+      if (rawNum !== null) {
+        inputSum += rawNum;
+      }
+      if (cleanNum !== null) {
+        outputSum += cleanNum;
+
+        // Flag Negative Transaction Balances as High-Priority Financial Alert
+        if (cleanNum < 0) {
+          if (!rowLeakageCounted) {
+            leakageRecoveredValue += Math.abs(cleanNum);
+            rowLeakageCounted = true;
+          }
+
+          reconciledAnomalies = reconciledAnomalies.filter((a) => {
+            const text = `${a.location} ${a.category} ${a.explanation}`.toLowerCase();
+            const matchesRow =
+              (txnLabel && text.includes(txnLabel.toLowerCase())) ||
+              new RegExp(`\\brow\\s*${rIdx + 1}\\b`, 'i').test(text) ||
+              new RegExp(`\\brow[\\s_]?index\\s*[:#]?\\s*${rIdx}\\b`, 'i').test(text);
+            const mentionsNegBal =
+              text.includes('negative') &&
+              (text.includes('amount') || text.includes('balance') || text.includes('total'));
+            return !(matchesRow && mentionsNegBal);
+          });
+
+          highPriorityFinancialAlerts.push({
+            id: `anom_finbal_${rIdx}_${crypto.randomUUID().slice(0, 6)}`,
+            severity: 'critical',
+            category: 'High-Priority Financial Alert',
+            location: `${rowPrefix}, normalized_amount`,
+            rawValue: rawAmtStr || cleanNum.toFixed(2),
+            suggestedOrFixedValue: `${cleanNum.toFixed(2)} ${rowCurrency} (Verify Reversal / Credit)`,
+            explanation: `Negative transaction balance (${cleanNum.toFixed(2)} ${rowCurrency}) detected on ${rowPrefix}. Flagged as High-Priority Financial Alert for pre-audit treasury review.`,
+          });
+        }
+      }
+    }
+
+    // Track explicit FX rate column for outlier detection
+    if (fxRateColIdx >= 0) {
+      const fxMapping = schemaMappings[fxRateColIdx];
+      const rawFx = String(rawRow[fxMapping.rawHeader] ?? '').trim();
+      const fxNum = parseNumericValue(cleanRow[fxMapping.normalizedHeader] || rawFx);
+      if (fxNum !== null) {
+        fxRates.push({ rIdx, rowPrefix, rawVal: rawFx, val: fxNum });
+      }
+    }
+
+    // 5. Flag negative quantities (e.g., TX-1006 with -2) as an Anomaly Warning
+    if (qtyColIdx >= 0) {
+      const qtyMapping = schemaMappings[qtyColIdx];
+      const rawQtyStr = String(rawRow[qtyMapping.rawHeader] ?? '').trim();
+      const cleanQtyStr = String(cleanRow[qtyMapping.normalizedHeader] ?? rawQtyStr).trim();
+      const qtyNum = parseNumericValue(cleanQtyStr) ?? parseNumericValue(rawQtyStr);
+
+      if (qtyNum !== null && qtyNum < 0) {
+        if (!rowLeakageCounted && unitPriceColIdx >= 0) {
+          const priceMapping = schemaMappings[unitPriceColIdx];
+          const priceNum = parseNumericValue(
+            cleanRow[priceMapping.normalizedHeader] || rawRow[priceMapping.rawHeader]
+          );
+          if (priceNum !== null) {
+            leakageRecoveredValue += Math.abs(qtyNum * priceNum);
+            rowLeakageCounted = true;
+          }
+        }
+
+        reconciledAnomalies = reconciledAnomalies.filter((a) => {
+          const text = `${a.location} ${a.category} ${a.explanation}`.toLowerCase();
+          const matchesRow =
+            (txnLabel && text.includes(txnLabel.toLowerCase())) ||
+            new RegExp(`\\brow\\s*${rIdx + 1}\\b`, 'i').test(text) ||
+            new RegExp(`\\brow[\\s_]?index\\s*[:#]?\\s*${rIdx}\\b`, 'i').test(text);
+          const mentionsNegativeQty =
+            text.includes('negative') &&
+            (text.includes('qty') || text.includes('quantity') || text.includes('unit'));
+          return !(matchesRow && mentionsNegativeQty);
+        });
+
+        warningAnomaliesToAdd.push({
+          id: `anom_negqty_${rIdx}_${crypto.randomUUID().slice(0, 6)}`,
+          severity: 'warning',
+          category: 'Negative Quantity',
+          location: `${rowPrefix}, ${qtyMapping.normalizedHeader}`,
+          rawValue: rawQtyStr || String(qtyNum),
+          suggestedOrFixedValue: `${Math.abs(qtyNum)} (verify return/credit)`,
+          explanation: `Negative quantity (${qtyNum}) detected in "${qtyMapping.rawHeader}" on ${rowPrefix}. Verify whether this entry represents a customer return, credit memo, or data-entry error.`,
+        });
+      }
+    }
+  }
+
+  // Flag multi-currency / FX anomalies as High-Priority Financial Alerts
+  if (hasExplicitMultiCurrency) {
+    const breakdown = Array.from(currencyCounts.entries())
+      .map(([code, count]) => `${code}: ${count}`)
+      .join(' · ');
+    highPriorityFinancialAlerts.unshift({
+      id: `anom_fxmix_${crypto.randomUUID().slice(0, 8)}`,
+      severity: 'critical',
+      category: 'High-Priority Financial Alert',
+      location: `Multi-Currency Ledger (${detectedCurrencies.join(', ')})`,
+      rawValue: breakdown,
+      suggestedOrFixedValue: `Standardized to raw_amount, normalized_amount, currency_code`,
+      explanation: `Mixed currency symbols (${detectedCurrencies.join(', ')}) detected without a unified FX conversion rate. Extracted ISO-4217 currency codes and decimal floats; verify spot exchange rates before consolidating cross-currency totals.`,
+    });
+  }
+
+  if (fxRates.length >= 3) {
+    const positiveRates = fxRates.map((r) => r.val).filter((v) => v > 0).sort((a, b) => a - b);
+    const medianFx = positiveRates.length > 0 ? positiveRates[Math.floor(positiveRates.length / 2)] : 1;
+    for (const entry of fxRates) {
+      if (entry.val <= 0 || entry.val > medianFx * 3 || entry.val < medianFx * 0.25) {
+        highPriorityFinancialAlerts.push({
+          id: `anom_fxrate_${entry.rIdx}_${crypto.randomUUID().slice(0, 6)}`,
+          severity: 'critical',
+          category: 'High-Priority Financial Alert',
+          location: `${entry.rowPrefix}, fx_rate`,
+          rawValue: entry.rawVal || String(entry.val),
+          suggestedOrFixedValue: `Review against median rate (~${medianFx.toFixed(4)})`,
+          explanation: `Exchange rate anomaly (${entry.val}) detected on ${entry.rowPrefix} relative to ledger median (${medianFx.toFixed(4)}).`,
+        });
+      }
+    }
+  }
+
+  // Build final schemaMappings & cleanedHeaders including multi-currency banking columns (raw_amount, normalized_amount, currency_code)
+  const finalSchemaMappings: SchemaMapping[] = [...schemaMappings];
+  if (shouldEmitLedgerCurrencyColumns && primaryAmountIdx >= 0) {
+    const rawAmtHeader = schemaMappings[primaryAmountIdx].rawHeader;
+    const existingNormSet = new Set(finalSchemaMappings.map((m) => m.normalizedHeader));
+
+    if (!existingNormSet.has('raw_amount')) {
+      finalSchemaMappings.push({
+        rawHeader: rawAmtHeader,
+        normalizedHeader: 'raw_amount',
+        detectedType: 'text',
+        reason: 'Preserved original unparsed monetary string for audit traceability',
+      });
+    }
+    if (!existingNormSet.has('normalized_amount')) {
+      finalSchemaMappings.push({
+        rawHeader: rawAmtHeader,
+        normalizedHeader: 'normalized_amount',
+        detectedType: 'currency',
+        reason: 'Standardized multi-currency numeric float for ledger aggregation',
+      });
+    }
+    if (!existingNormSet.has('currency_code')) {
+      finalSchemaMappings.push({
+        rawHeader:
+          existingCurrencyIdx >= 0 ? schemaMappings[existingCurrencyIdx].rawHeader : rawAmtHeader,
+        normalizedHeader: 'currency_code',
+        detectedType: 'status',
+        reason: 'Extracted ISO-4217 currency code (USD, EUR, GBP, CAD, AUD)',
+      });
+    }
+  }
+  const finalCleanedHeaders = finalSchemaMappings.map((m) => m.normalizedHeader);
+
+  // Place High-Priority Financial Alerts & Critical Formula Errors first
+  const finalAnomalies = [
+    ...highPriorityFinancialAlerts,
+    ...criticalFormulaAnomalies,
+    ...warningAnomaliesToAdd,
+    ...reconciledAnomalies,
+  ].slice(0, MAX_DETAILED_ANOMALIES + 25);
+
+  // Recompute exact cell-level diffs against reconciled rows
+  const cellDiffs: CellDiff[] = [];
+  let totalNormalizedCells = 0;
+
+  for (let rIdx = 0; rIdx < parsed.rows.length; rIdx++) {
+    const rawRow = parsed.rows[rIdx];
+    const cleanRow = cleanedRows[rIdx] || {};
+
+    for (let cIdx = 0; cIdx < schemaMappings.length; cIdx++) {
+      const m = schemaMappings[cIdx];
+      const rawVal = String(rawRow[m.rawHeader] ?? '');
+      const cleanVal = String(cleanRow[m.normalizedHeader] ?? rawVal);
+
+      if (rawVal !== cleanVal) {
+        totalNormalizedCells++;
+        if (cellDiffs.length < MAX_TRACKED_CELL_DIFFS) {
+          const hasFormulaErr =
+            formulaErrorMap.has(`${rIdx}:${m.rawHeader}`) ||
+            FORMULA_TOKEN_REGEX.test(rawVal.trim());
+          cellDiffs.push({
+            rowIndex: rIdx,
+            column: m.normalizedHeader,
+            rawHeader: m.rawHeader,
+            rawValue: rawVal,
+            cleanedValue: cleanVal,
+            changeType: hasFormulaErr
+              ? 'formula_error'
+              : inferChangeType(m.normalizedHeader, rawVal, cleanVal),
+          });
+        }
+      }
+    }
+  }
+
+  // Compute Reconciliation Confidence Score (0-100%)
+  const totalCells = Math.max(1, parsed.rows.length * finalCleanedHeaders.length);
+  let unresolvedErrorCells = 0;
+  for (const row of cleanedRows) {
+    for (const h of finalCleanedHeaders) {
+      const v = String(row[h] ?? '');
+      if (v.startsWith('[ERROR:') || v === '[MISSING]') {
+        unresolvedErrorCells++;
+      }
+    }
+  }
+  const unresolvedCriticalPenalty = Math.min(2.5, highPriorityFinancialAlerts.length * 0.15);
+  const rawConfidence =
+    ((totalCells - unresolvedErrorCells) / totalCells) * 100 - unresolvedCriticalPenalty;
+  const reconciliationConfidenceScore = Number(
+    Math.max(0, Math.min(100, rawConfidence)).toFixed(1)
+  );
+
+  const auditMetadata: AuditMetadata = {
+    fileHashSha256,
+    timestampUtc,
+    rowsIngested: parsed.rows.length,
+    rowsCleaned: cleanedRows.length,
+    rowChecksumMatch: parsed.rows.length === cleanedRows.length,
+    inputSum: Number(inputSum.toFixed(2)),
+    outputSum: Number(outputSum.toFixed(2)),
+    reconciledVariance: Number((outputSum - inputSum).toFixed(2)),
+    primaryAmountColumn: primaryAmountIdx >= 0 ? 'normalized_amount' : null,
+    detectedCurrencies:
+      detectedCurrencies.length > 0
+        ? detectedCurrencies
+        : shouldEmitLedgerCurrencyColumns
+        ? [dominantCurrency]
+        : [],
+    leakageRecoveredValue: Number(leakageRecoveredValue.toFixed(2)),
+    reconciliationConfidenceScore,
+  };
+
+  return {
+    cleanedHeaders: finalCleanedHeaders,
+    cleanedRows,
+    schemaMappings: finalSchemaMappings,
+    anomalies: finalAnomalies,
+    cellDiffs,
+    totalNormalizedCells,
+    auditMetadata,
+  };
+}
+
 async function cleanLargeTabularDataset(params: {
   userId: string;
   fileName: string;
   parsed: ParsedTabularInput;
   startMs: number;
+  fileHashSha256?: string;
 }): Promise<CleanJobRecord> {
   const ai = getAiClient();
   const { parsed, startMs } = params;
@@ -649,7 +1326,7 @@ Return one schemaMapping entry for EVERY rawHeader in exact column order.`;
   }
 
   const ruleData = JSON.parse(jsonText) as GeminiSchemaRuleResponse;
-  const documentCategory = sanitizeCategory(ruleData.documentCategory);
+  const documentCategory = sanitizeTabularCategory(ruleData.documentCategory);
   const patterns: DetectedPatternRules = {
     dateFormatHint:
       ruleData.detectedPatterns?.dateFormatHint === 'MDY' ||
@@ -666,36 +1343,14 @@ Return one schemaMapping entry for EVERY rawHeader in exact column order.`;
   };
 
   // Align schemaMappings strictly 1:1 with parsed.headers
-  const mappingByRaw = new Map<string, SchemaMapping>();
-  for (const m of ruleData.schemaMappings || []) {
-    mappingByRaw.set(m.rawHeader, {
-      rawHeader: m.rawHeader,
-      normalizedHeader: m.normalizedHeader || fallbackSnakeHeader(m.rawHeader),
-      detectedType: m.detectedType || 'text',
-      reason: m.reason || 'Detected from 40-row AI schema sample',
-    });
-  }
+  const schemaMappings = alignSchemaMappings(
+    parsed.headers,
+    ruleData.schemaMappings || [],
+    'Detected from 40-row AI schema sample'
+  );
 
-  const usedNormHeaders = new Map<string, number>();
-  const schemaMappings: SchemaMapping[] = parsed.headers.map((rawHeader) => {
-    const matched = mappingByRaw.get(rawHeader);
-    const baseNorm = matched?.normalizedHeader || fallbackSnakeHeader(rawHeader);
-    const count = usedNormHeaders.get(baseNorm) ?? 0;
-    usedNormHeaders.set(baseNorm, count + 1);
-    const uniqueNorm = count === 0 ? baseNorm : `${baseNorm}_${count + 1}`;
-    return {
-      rawHeader,
-      normalizedHeader: uniqueNorm,
-      detectedType: matched?.detectedType || 'text',
-      reason: matched?.reason || 'Inferred from header structure',
-    };
-  });
-
-  const cleanedHeaders = schemaMappings.map((m) => m.normalizedHeader);
   const allCleanedRows: Record<string, string>[] = new Array(parsed.rows.length);
-  const cellDiffs: CellDiff[] = [];
   const allAnomalies: AnomalyItem[] = [];
-  let totalNormalizedCells = 0;
   let overflowAnomaliesCount = 0;
 
   const pushAnomaly = (anom: Omit<AnomalyItem, 'id'>) => {
@@ -804,19 +1459,6 @@ Return one schemaMapping entry for EVERY rawHeader in exact column order.`;
           });
         }
 
-        if (rawVal !== cleanVal) {
-          totalNormalizedCells++;
-          if (cellDiffs.length < MAX_TRACKED_CELL_DIFFS) {
-            cellDiffs.push({
-              rowIndex: rIdx,
-              column: mapping.normalizedHeader,
-              rawHeader: mapping.rawHeader,
-              rawValue: rawVal,
-              cleanedValue: cleanVal,
-              changeType: inferChangeType(mapping.normalizedHeader, rawVal, cleanVal),
-            });
-          }
-        }
       }
 
       const sig = sigParts.join('|');
@@ -847,27 +1489,27 @@ Return one schemaMapping entry for EVERY rawHeader in exact column order.`;
     }
   }
 
-  // Ensure deterministic inclusion of all SheetJS / CSV formula errors
-  for (const fe of parsed.formulaErrors) {
-    pushAnomaly({
-      severity: 'critical',
-      category: 'Formula Error',
-      location: `Row ${fe.rowIndex + 1}, ${fe.column} (${fe.cellAddress})`,
-      rawValue: fe.formula ? `${fe.errorToken} (${fe.formula})` : fe.errorToken,
-      suggestedOrFixedValue: '[Manual Review Required]',
-      explanation: `Spreadsheet cell ${fe.cellAddress} evaluated to ${fe.errorToken}.`,
-    });
-  }
+  // Reconcile formula errors, multi-currency banking columns, financial alerts, and institutional audit metadata
+  const createdAt = new Date().toISOString();
+  const reconciled = reconcileTabularRowsAndAudit({
+    parsed,
+    schemaMappings,
+    cleanedRows: allCleanedRows,
+    anomalies: allAnomalies,
+    dateFormatHint: patterns.dateFormatHint,
+    fileHashSha256: params.fileHashSha256,
+    timestampUtc: createdAt,
+  });
 
   if (overflowAnomaliesCount > 0 || duplicateRowsCount > 25) {
-    allAnomalies.push({
+    reconciled.anomalies.push({
       id: `anom_${crypto.randomUUID().slice(0, 8)}`,
       severity: 'warning',
       category: 'High-Capacity Audit Rollup',
       location: `Rows 1–${parsed.rows.length}`,
       rawValue: `${overflowAnomaliesCount + Math.max(0, duplicateRowsCount - 25)} additional items`,
       suggestedOrFixedValue: 'Export full cleaned XLSX/CSV',
-      explanation: `Chunked processing normalized ${totalNormalizedCells.toLocaleString()} cells across ${parsed.rows.length.toLocaleString()} rows using Gemini 40-row schema rules (${duplicateRowsCount} duplicate rows detected).`,
+      explanation: `Chunked processing normalized ${reconciled.totalNormalizedCells.toLocaleString()} cells across ${parsed.rows.length.toLocaleString()} rows using Gemini 40-row schema rules (${duplicateRowsCount} duplicate rows detected).`,
     });
   }
 
@@ -883,15 +1525,16 @@ Return one schemaMapping entry for EVERY rawHeader in exact column order.`;
     documentCategory,
     rawHeaders: parsed.headers,
     rawRows: parsed.rows,
-    cleanedHeaders,
-    cleanedRows: allCleanedRows,
-    cellDiffs,
-    anomalies: allAnomalies,
-    schemaMappings,
-    executiveSummary: `${baseSummary} High-capacity chunked engine normalized ${totalNormalizedCells.toLocaleString()} cells across ${parsed.rows.length.toLocaleString()} rows.`,
+    cleanedHeaders: reconciled.cleanedHeaders,
+    cleanedRows: reconciled.cleanedRows,
+    cellDiffs: reconciled.cellDiffs,
+    anomalies: reconciled.anomalies,
+    schemaMappings: reconciled.schemaMappings,
+    executiveSummary: `${baseSummary} High-capacity chunked engine normalized ${reconciled.totalNormalizedCells.toLocaleString()} cells across ${parsed.rows.length.toLocaleString()} rows.`,
     rowCount: parsed.rows.length,
     processingMs: Date.now() - startMs,
-    createdAt: new Date().toISOString(),
+    createdAt,
+    auditMetadata: reconciled.auditMetadata,
   };
 }
 
@@ -899,6 +1542,7 @@ export async function cleanTabularDocument(params: {
   userId: string;
   fileName: string;
   parsed: ParsedTabularInput;
+  fileHashSha256?: string;
 }): Promise<CleanJobRecord> {
   const startMs = Date.now();
   const { parsed } = params;
@@ -923,9 +1567,9 @@ Strict normalization rules:
 3. Currency & Amounts: Normalize inconsistent currency strings ("$1,250.00", "USD 1250", "1.250,00 €", "(45.50)") into clean decimal numbers with 2 decimal places (e.g. "1250.00", "-45.50"). If multiple currencies appear, preserve or create a clean currency code or note the currency in the column/anomaly log, and keep numbers strictly formatted as decimal strings like "1250.00".
 4. Phone Numbers: Normalize messy phone numbers ("(415) 555-0192", "415.555.0192", "1 415 555 0192") into consistent "+1-415-555-0192" (or E.164 if international). Flag invalid/incomplete numbers as warnings.
 5. Whitespace & Casing: Trim stray spaces, normalize vendor/client name casing to clean Title Case where appropriate, normalize status values ("paid", "PAID", "Settled" -> "Paid").
-6. Formula Errors & Missing Critical Fields: Never fabricate numbers for #REF!, #DIV/0!, #VALUE!, #NAME?, or missing totals—preserve "[ERROR: #DIV/0!]" or "[MISSING]" and log a "critical" anomaly explaining how to fix it.
+6. Formula Errors & Negative Quantities: Detect all spreadsheet formula errors (=#REF!, =#DIV/0!, =#VALUE!, #REF!, #DIV/0!, #VALUE!, #NAME?, #N/A) and log each as a "critical" anomaly with category "Formula Error". When a formula error occurs in a total/amount column and numeric quantity and unit_price columns exist on the same row, auto-calculate the repaired value as (quantity * unit_price) formatted to 2 decimal places. For any negative quantity (e.g., -2), preserve the numeric value and log a "warning" anomaly with category "Negative Quantity".
 7. Duplicates: Detect exact or near-duplicate rows (same date + vendor + amount) and log a "warning" anomaly.
-8. Preserve EVERY row index 0..N-1 in cleanedRows. Never drop rows.`;
+8. Preserve EVERY row index 0..N-1 and EVERY column in rawHeaders. Never drop rows or columns. Never classify a tabular spreadsheet as "receipt".`;
 
   // Standard AI batch path for small/medium datasets (<= 100 rows)
   const BATCH_SIZE = 60;
@@ -976,23 +1620,19 @@ Strict normalization rules:
     const aiData = JSON.parse(jsonText) as GeminiTabularResponse;
 
     if (offset === 0) {
-      documentCategory = sanitizeCategory(aiData.documentCategory);
-      schemaMappings = (aiData.schemaMappings || []).map((m) => ({
-        rawHeader: m.rawHeader,
-        normalizedHeader: m.normalizedHeader,
-        detectedType: m.detectedType || 'text',
-        reason: m.reason,
-      }));
+      documentCategory = sanitizeTabularCategory(aiData.documentCategory);
+      schemaMappings = alignSchemaMappings(
+        parsed.headers,
+        aiData.schemaMappings || [],
+        'Normalized tabular column header'
+      );
     }
     if (aiData.executiveSummary) {
       summaryParts.push(aiData.executiveSummary);
     }
 
-    // Build header lookup so every column stays aligned
-    const normalizedHeaders =
-      schemaMappings.length > 0
-        ? schemaMappings.map((m) => m.normalizedHeader)
-        : parsed.headers;
+    // Build header lookup so every column stays aligned 1:1 with parsed.headers
+    const normalizedHeaders = schemaMappings.map((m) => m.normalizedHeader);
 
     const rowMap = new Map<number, Record<string, string>>();
     for (const item of aiData.cleanedRows || []) {
@@ -1001,7 +1641,12 @@ Strict normalization rules:
         record[h] = '';
       }
       for (const cell of item.cells || []) {
-        record[cell.column] = String(cell.value ?? '');
+        const normKey = fallbackSnakeHeader(cell.column);
+        if (cell.column in record) {
+          record[cell.column] = String(cell.value ?? '');
+        } else if (normKey in record) {
+          record[normKey] = String(cell.value ?? '');
+        }
       }
       rowMap.set(item.rowIndex, record);
     }
@@ -1010,6 +1655,13 @@ Strict normalization rules:
       const globalIdx = offset + i;
       const mapped = rowMap.get(globalIdx);
       if (mapped) {
+        // Fill any blank cells that had raw values if AI omitted a column key
+        parsed.headers.forEach((rawH, colIdx) => {
+          const normH = normalizedHeaders[colIdx];
+          if (mapped[normH] === '' && String(parsed.rows[globalIdx][rawH] ?? '').trim() !== '') {
+            mapped[normH] = String(parsed.rows[globalIdx][rawH] ?? '');
+          }
+        });
         allCleanedRows.push(mapped);
       } else {
         // Fallback: preserve original values mapped to normalized headers
@@ -1035,55 +1687,17 @@ Strict normalization rules:
     }
   }
 
-  // Ensure deterministic inclusion of any Excel formula errors detected by SheetJS
-  for (const fe of parsed.formulaErrors) {
-    const alreadyLogged = allAnomalies.some(
-      (a) =>
-        a.location.includes(fe.cellAddress) ||
-        a.rawValue.includes(fe.errorToken)
-    );
-    if (!alreadyLogged) {
-      allAnomalies.unshift({
-        id: `anom_${crypto.randomUUID().slice(0, 8)}`,
-        severity: 'critical',
-        category: 'Formula Error',
-        location: `Row ${fe.rowIndex + 1}, ${fe.column} (${fe.cellAddress})`,
-        rawValue: fe.formula ? `${fe.errorToken} (${fe.formula})` : fe.errorToken,
-        suggestedOrFixedValue: '[Manual Review Required]',
-        explanation: `Spreadsheet cell ${fe.cellAddress} evaluated to ${fe.errorToken}.`,
-      });
-    }
-  }
-
-  const cleanedHeaders =
-    schemaMappings.length > 0
-      ? schemaMappings.map((m) => m.normalizedHeader)
-      : parsed.headers;
-
-  // Compute accurate cell-level diffs comparing rawRows vs cleanedRows
-  const cellDiffs: CellDiff[] = [];
-  for (let rIdx = 0; rIdx < parsed.rows.length; rIdx++) {
-    const rawRow = parsed.rows[rIdx];
-    const cleanRow = allCleanedRows[rIdx] || {};
-
-    for (let cIdx = 0; cIdx < parsed.headers.length; cIdx++) {
-      const rawHeader = parsed.headers[cIdx];
-      const normHeader = cleanedHeaders[cIdx] || rawHeader;
-      const rawVal = String(rawRow[rawHeader] ?? '');
-      const cleanVal = String(cleanRow[normHeader] ?? rawVal);
-
-      if (rawVal !== cleanVal) {
-        cellDiffs.push({
-          rowIndex: rIdx,
-          column: normHeader,
-          rawHeader,
-          rawValue: rawVal,
-          cleanedValue: cleanVal,
-          changeType: inferChangeType(normHeader, rawVal, cleanVal),
-        });
-      }
-    }
-  }
+  // Deterministic post-reconciliation: guarantees formula error auto-calculation, multi-currency banking columns,
+  // High-Priority Financial Alerts, ISO-8601 dates, phone normalization, and Institutional AuditMetadata
+  const createdAt = new Date().toISOString();
+  const reconciled = reconcileTabularRowsAndAudit({
+    parsed,
+    schemaMappings,
+    cleanedRows: allCleanedRows,
+    anomalies: allAnomalies,
+    fileHashSha256: params.fileHashSha256,
+    timestampUtc: createdAt,
+  });
 
   return {
     id: `job_${crypto.randomUUID().slice(0, 12)}`,
@@ -1093,17 +1707,18 @@ Strict normalization rules:
     documentCategory,
     rawHeaders: parsed.headers,
     rawRows: parsed.rows,
-    cleanedHeaders,
-    cleanedRows: allCleanedRows,
-    cellDiffs,
-    anomalies: allAnomalies,
-    schemaMappings,
+    cleanedHeaders: reconciled.cleanedHeaders,
+    cleanedRows: reconciled.cleanedRows,
+    cellDiffs: reconciled.cellDiffs,
+    anomalies: reconciled.anomalies,
+    schemaMappings: reconciled.schemaMappings,
     executiveSummary:
       summaryParts[0] ||
-      `Normalized ${parsed.rows.length} rows across ${cleanedHeaders.length} columns with ${cellDiffs.length} cell corrections.`,
+      `Normalized ${parsed.rows.length} rows across ${reconciled.cleanedHeaders.length} columns with ${reconciled.cellDiffs.length} cell corrections.`,
     rowCount: parsed.rows.length,
     processingMs: Date.now() - startMs,
-    createdAt: new Date().toISOString(),
+    createdAt,
+    auditMetadata: reconciled.auditMetadata,
   };
 }
 
@@ -1111,6 +1726,7 @@ export async function cleanMultimodalDocument(params: {
   userId: string;
   fileName: string;
   parsed: ParsedBinaryDocumentInput;
+  fileHashSha256?: string;
 }): Promise<CleanJobRecord> {
   const startMs = Date.now();
   const ai = getAiClient();
@@ -1212,6 +1828,44 @@ If the receipt shows subtotal, tax, tip, or total discrepancies, or illegible/bl
     reason: 'Extracted from document structure',
   }));
 
+  const createdAt = new Date().toISOString();
+  const amountCol = headers.find((h) => /total|amount|price/i.test(h)) || null;
+  let inputSum = 0;
+  let outputSum = 0;
+  const detectedCurSet = new Set<string>();
+
+  if (amountCol) {
+    for (let i = 0; i < cleanedRows.length; i++) {
+      const rv = parseNumericValue(rawRows[i]?.[amountCol]);
+      const cv = parseNumericValue(cleanedRows[i]?.[amountCol]);
+      const cur = detectCurrencyCode(rawRows[i]?.[amountCol]) || detectCurrencyCode(cleanedRows[i]?.['currency']);
+      if (cur) detectedCurSet.add(cur);
+      if (rv !== null) inputSum += rv;
+      if (cv !== null) outputSum += cv;
+    }
+  }
+
+  const fileHashSha256 =
+    params.fileHashSha256 ||
+    crypto.createHash('sha256').update(Buffer.from(parsed.base64Data, 'base64')).digest('hex');
+
+  const multimodalAudit: AuditMetadata = {
+    fileHashSha256,
+    timestampUtc: createdAt,
+    rowsIngested: rawRows.length > 0 ? rawRows.length : cleanedRows.length,
+    rowsCleaned: cleanedRows.length,
+    rowChecksumMatch: (rawRows.length > 0 ? rawRows.length : cleanedRows.length) === cleanedRows.length,
+    inputSum: Number(inputSum.toFixed(2)),
+    outputSum: Number(outputSum.toFixed(2)),
+    reconciledVariance: Number((outputSum - inputSum).toFixed(2)),
+    primaryAmountColumn: amountCol,
+    detectedCurrencies: detectedCurSet.size > 0 ? Array.from(detectedCurSet) : ['USD'],
+    leakageRecoveredValue: Number(Math.abs(outputSum - inputSum).toFixed(2)),
+    reconciliationConfidenceScore: Number(
+      Math.max(85, 100 - anomalies.filter((a) => a.severity === 'critical').length * 1.2).toFixed(1)
+    ),
+  };
+
   return {
     id: `job_${crypto.randomUUID().slice(0, 12)}`,
     userId: params.userId,
@@ -1230,6 +1884,7 @@ If the receipt shows subtotal, tax, tip, or total discrepancies, or illegible/bl
       `Extracted and normalized ${cleanedRows.length} structured rows from ${params.fileName}.`,
     rowCount: cleanedRows.length,
     processingMs: Date.now() - startMs,
-    createdAt: new Date().toISOString(),
+    createdAt,
+    auditMetadata: multimodalAudit,
   };
 }

@@ -35,6 +35,21 @@ export interface SchemaMapping {
   reason: string;
 }
 
+export interface AuditMetadata {
+  fileHashSha256: string;
+  timestampUtc: string;
+  rowsIngested: number;
+  rowsCleaned: number;
+  rowChecksumMatch: boolean;
+  inputSum: number;
+  outputSum: number;
+  reconciledVariance: number;
+  primaryAmountColumn: string | null;
+  detectedCurrencies: string[];
+  leakageRecoveredValue: number;
+  reconciliationConfidenceScore: number;
+}
+
 export interface CleanJobRecord {
   id: string;
   userId: string;
@@ -52,6 +67,7 @@ export interface CleanJobRecord {
   rowCount: number;
   processingMs: number;
   createdAt: string;
+  auditMetadata?: AuditMetadata;
 }
 
 export interface UserRecord {

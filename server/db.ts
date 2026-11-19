@@ -89,6 +89,14 @@ db.exec(`
   );
 `);
 
+// Safe schema migration for existing SQLite databases: add audit_metadata_json if absent
+const cleanJobColumns = db
+  .prepare(`PRAGMA table_info(clean_jobs)`)
+  .all() as Array<{ name: string }>;
+if (!cleanJobColumns.some((c) => c.name === 'audit_metadata_json')) {
+  db.exec(`ALTER TABLE clean_jobs ADD COLUMN audit_metadata_json TEXT`);
+}
+
 interface UserRow {
   id: string;
   email: string;
@@ -285,8 +293,8 @@ export function saveCleanJob(job: CleanJobRecord): void {
       id, user_id, file_name, file_type, document_category,
       raw_headers_json, raw_rows_json, cleaned_headers_json, cleaned_rows_json,
       cell_diffs_json, anomalies_json, schema_mappings_json, executive_summary,
-      row_count, processing_ms, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      row_count, processing_ms, created_at, audit_metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     job.id,
     job.userId,
@@ -303,7 +311,8 @@ export function saveCleanJob(job: CleanJobRecord): void {
     job.executiveSummary,
     job.rowCount,
     job.processingMs,
-    job.createdAt
+    job.createdAt,
+    job.auditMetadata ? JSON.stringify(job.auditMetadata) : null
   );
 }
 
@@ -324,6 +333,7 @@ interface CleanJobRow {
   row_count: number;
   processing_ms: number;
   created_at: string;
+  audit_metadata_json?: string | null;
 }
 
 function mapCleanJobRow(row: CleanJobRow): CleanJobRecord {
@@ -344,6 +354,7 @@ function mapCleanJobRow(row: CleanJobRow): CleanJobRecord {
     rowCount: row.row_count,
     processingMs: row.processing_ms,
     createdAt: row.created_at,
+    auditMetadata: row.audit_metadata_json ? JSON.parse(row.audit_metadata_json) : undefined,
   };
 }
 
