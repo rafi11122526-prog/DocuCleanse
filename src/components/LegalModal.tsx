@@ -165,7 +165,7 @@ export function LegalModal({
               <p>
                 We stand behind the accuracy of DocuCleanse&apos;s automated schema mapping,
                 currency/date normalization, and formula error detection. If you purchase a Pro
-                monthly subscription ($29/mo) or Pay-Per-Use Token Pack ($5) and automated file
+                monthly subscription ($40/mo) or Pay-Per-Use Token Pack ($5) and automated file
                 cleaning or formatting fails to match product specifications, you are eligible for a
                 full refund within 14 calendar days of the original transaction.
               </p>

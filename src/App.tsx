@@ -177,7 +177,7 @@ export default function App() {
       setPaywall({
         open: true,
         reason:
-          'You have reached your Free tier monthly limit. Upgrade to Pro ($29/mo) or grab a $5 Token Pack to continue exporting.',
+          'You have reached your Free tier monthly limit. Upgrade to Pro ($40/mo) or grab a $5 Token Pack to continue exporting.',
         code: 'EXPORT_LIMIT_REACHED',
       });
       return;

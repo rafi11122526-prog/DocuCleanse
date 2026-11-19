@@ -60,7 +60,7 @@ export function BillingWebhooksView({
                     ? '500'
                     : paddleEventKind === 'subscription.canceled'
                     ? '0'
-                    : '2900',
+                    : '4000',
               },
             },
             items: [
@@ -88,7 +88,7 @@ export function BillingWebhooksView({
           type: 'checkout.session.completed',
           data: {
             object: {
-              amount_total: stripeTier === 'pro' ? 2900 : 500,
+              amount_total: stripeTier === 'pro' ? 4000 : 500,
               metadata: {
                 userId: quota?.userId || 'usr_demo_freelancer',
                 tier: stripeTier,
@@ -108,7 +108,7 @@ export function BillingWebhooksView({
           provider === 'paddle'
             ? paddleEventKind
             : stripeTier === 'pro'
-            ? 'Pro ($29/mo)'
+            ? 'Pro ($40/mo)'
             : '15-Token Pack ($5)';
         onQuotaUpdated(data.quota, `Processed ${provider} webhook (${label}).`);
       }
@@ -168,7 +168,7 @@ export function BillingWebhooksView({
               <td className="py-3 px-5 font-medium text-slate-900 dark:text-slate-100">Pricing</td>
               <td className="py-3 px-5 font-mono tabular-nums">$0 / month</td>
               <td className="py-3 px-5 font-mono tabular-nums">$5 one-time (15 cleans)</td>
-              <td className="py-3 px-5 font-mono tabular-nums font-semibold">$29 / month</td>
+              <td className="py-3 px-5 font-mono tabular-nums font-semibold">$40 / month</td>
             </tr>
             <tr>
               <td className="py-3 px-5 font-medium text-slate-900 dark:text-slate-100">
@@ -281,7 +281,7 @@ export function BillingWebhooksView({
                       : 'text-slate-600 dark:text-slate-400'
                   }`}
                 >
-                  Grant Pro ($29)
+                  Grant Pro ($40)
                 </button>
                 <button
                   type="button"

@@ -1341,6 +1341,8 @@ export async function createCheckoutSession(params: {
   transactionId?: string;
   canOpenPaddleOverlay?: boolean;
   paddleFallbackReason?: string;
+  paddleErrorCode?: string;
+  suggestedCheckoutUrl?: string;
   sandboxMode?: boolean;
 }> {
   try {
@@ -1358,6 +1360,8 @@ export async function createCheckoutSession(params: {
       transactionId?: string;
       canOpenPaddleOverlay?: boolean;
       paddleFallbackReason?: string;
+      paddleErrorCode?: string;
+      suggestedCheckoutUrl?: string;
       sandboxMode?: boolean;
     }>(res);
   } catch (err) {
@@ -1402,7 +1406,7 @@ export async function completeSandboxCheckout(params: {
             ? 'checkout.session.completed'
             : 'token_pack.purchased',
         plan_granted: params.plan,
-        amount_cents: params.plan === 'pro' ? 2900 : 500,
+        amount_cents: params.plan === 'pro' ? 4000 : 500,
         created_at: new Date().toISOString(),
       });
       return {
@@ -1410,7 +1414,7 @@ export async function completeSandboxCheckout(params: {
         quota: syncMockQuotaFlags(),
         message:
           params.plan === 'pro'
-            ? `Upgraded to DocuCleanse Pro ($29/mo) via ${params.provider === 'paddle' ? 'Paddle' : 'Stripe'}.`
+            ? `Upgraded to DocuCleanse Pro ($40/mo) via ${params.provider === 'paddle' ? 'Paddle' : 'Stripe'}.`
             : `Added 15 Pro-grade tokens ($5 Token Pack) via ${params.provider === 'paddle' ? 'Paddle' : 'Stripe'}.`,
       };
     }

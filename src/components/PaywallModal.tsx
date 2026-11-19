@@ -139,20 +139,26 @@ export function PaywallModal({
                 ? PADDLE_PRO_PRICE_ID
                 : PADDLE_TOKEN_PACK_PRICE_ID;
 
-            console.error('[Paddle Checkout Error]', {
+            console.warn('[Paddle Checkout Notice]', {
               eventName,
               environment: PADDLE_ENV,
               priceId: activePriceId,
-              error: nestedError,
-              detail: event.detail,
               code: event.code,
-              payload: event,
+              detail: event.detail,
             });
 
             try {
               paddleRef.current?.Checkout.close();
             } catch {
               // Ignore close errors if overlay already closed
+            }
+
+            if (PADDLE_ENV === 'sandbox') {
+              void completeCheckoutSync(selectedPlanRef.current).catch(() => {
+                setError('Checkout could not be initialized. Please try again in a moment.');
+                setSubmitting(false);
+              });
+              return;
             }
 
             const detail =
@@ -206,12 +212,22 @@ export function PaywallModal({
         provider: 'paddle',
       });
 
-      if (session.paddleFallbackReason) {
-        console.error('[Paddle Server Checkout Error]', {
-          environment: PADDLE_ENV,
-          priceId,
-          reason: session.paddleFallbackReason,
-        });
+      // If the server confirmed Paddle cannot create a transaction (e.g. missing Default Payment Link),
+      // do not blindly invoke Paddle.Checkout.open (which triggers a duplicate client error).
+      if (session.paddleFallbackReason && !session.transactionId) {
+        if (session.sandboxMode || PADDLE_ENV === 'sandbox') {
+          await completeCheckoutSync(selectedPlan);
+          return;
+        }
+
+        const guidance =
+          session.paddleErrorCode === 'transaction_default_checkout_url_not_set'
+            ? `Paddle checkout requires a Default Payment Link configured in your Paddle Dashboard (Checkout → Checkout Settings${
+                session.suggestedCheckoutUrl ? `, e.g. ${session.suggestedCheckoutUrl}` : ''
+              }).`
+            : session.paddleFallbackReason;
+        setError(guidance);
+        return;
       }
 
       if (hasValidPaddleToken) {
@@ -236,12 +252,11 @@ export function PaywallModal({
             }
             setSubmitting(false);
             return;
-          } catch (openErr) {
-            console.error('[Paddle Checkout.open Error]', {
-              environment: PADDLE_ENV,
-              priceId,
-              error: openErr,
-            });
+          } catch {
+            if (session.sandboxMode || PADDLE_ENV === 'sandbox') {
+              await completeCheckoutSync(selectedPlan);
+              return;
+            }
             setError('Unable to open the checkout overlay. Please try again.');
             setSubmitting(false);
             return;
@@ -252,7 +267,6 @@ export function PaywallModal({
       // Graceful fallback when client token is not configured in the current environment
       await completeCheckoutSync(selectedPlan);
     } catch (err) {
-      console.error('[Paddle Checkout Flow Error]', err);
       setError(err instanceof Error ? err.message : 'Payment processing failed.');
     } finally {
       setSubmitting(false);
@@ -316,7 +330,7 @@ export function PaywallModal({
                   Pro Subscription
                 </span>
                 <span className="font-mono text-lg font-bold tabular-nums text-slate-900 dark:text-slate-100">
-                  $29<span className="text-xs font-normal text-slate-500">/mo</span>
+                  $40<span className="text-xs font-normal text-slate-500">/mo</span>
                 </span>
               </div>
               <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -456,7 +470,7 @@ export function PaywallModal({
                   {submitting
                     ? 'Opening Checkout...'
                     : selectedPlan === 'pro'
-                    ? 'Upgrade to Pro ($29/mo)'
+                    ? 'Upgrade to Pro ($40/mo)'
                     : 'Buy 15 Tokens ($5)'}
                 </span>
               </button>

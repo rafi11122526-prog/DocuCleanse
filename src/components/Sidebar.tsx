@@ -142,7 +142,7 @@ export function Sidebar({
               className="mt-1 flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 whitespace-nowrap shrink-0"
             >
               <Sparkles className="h-3.5 w-3.5" />
-              <span>Upgrade to Pro ($29/mo)</span>
+              <span>Upgrade to Pro ($40/mo)</span>
             </button>
           )}
         </div>

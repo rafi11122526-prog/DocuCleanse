@@ -72,6 +72,37 @@ function verifyPaddleSignature(
   return crypto.timingSafeEqual(expectedBuf, receivedBuf);
 }
 
+function resolveCheckoutUrl(req: express.Request): string | undefined {
+  const candidates = [
+    process.env.PADDLE_CHECKOUT_URL,
+    req.get('origin'),
+    process.env.APP_URL,
+    req.get('x-forwarded-host')
+      ? `${req.get('x-forwarded-proto') || 'https'}://${req.get('x-forwarded-host')}`
+      : undefined,
+    req.get('host') ? `${req.protocol}://${req.get('host')}` : undefined,
+  ];
+
+  let httpFallback: string | undefined;
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const trimmed = candidate.trim();
+    if (!trimmed || /^MY_APP_URL$/i.test(trimmed)) continue;
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol === 'https:') {
+        return parsed.origin;
+      }
+      if (parsed.protocol === 'http:' && !httpFallback) {
+        httpFallback = parsed.origin;
+      }
+    } catch {
+      // Ignore malformed URL candidate
+    }
+  }
+  return httpFallback;
+}
+
 /**
  * Initiates a Paddle or Stripe checkout session.
  * When PADDLE_API_KEY is configured, creates a Paddle transaction server-side so client-side
@@ -90,13 +121,15 @@ billingRouter.post('/checkout', async (req, res) => {
     return;
   }
 
-  const amountCents = plan === 'pro' ? 2900 : 500;
+  const amountCents = plan === 'pro' ? 4000 : 500;
   const sessionId = `cs_${provider}_${crypto.randomUUID().slice(0, 14)}`;
   const priceId = plan === 'pro' ? PADDLE_PRO_PRICE_ID : PADDLE_TOKEN_PACK_PRICE_ID;
+  const checkoutUrl = resolveCheckoutUrl(req);
 
   let transactionId: string | undefined;
   let canOpenPaddleOverlay = false;
   let paddleFallbackReason: string | undefined;
+  let paddleErrorCode: string | undefined;
 
   if (provider === 'paddle' && isConfiguredSecret(process.env.PADDLE_API_KEY)) {
     const apiKey = process.env.PADDLE_API_KEY!.trim();
@@ -107,21 +140,66 @@ billingRouter.post('/checkout', async (req, res) => {
       ? 'https://api.paddle.com'
       : 'https://sandbox-api.paddle.com';
 
-    try {
-      const paddleRes = await fetch(`${paddleApiBase}/transactions`, {
+    const createPaddleTransaction = async (includeCheckoutUrl: boolean) => {
+      const payload: Record<string, unknown> = {
+        items: [{ price_id: priceId, quantity: 1 }],
+        custom_data: {
+          userId,
+          plan,
+        },
+      };
+      if (includeCheckoutUrl && checkoutUrl) {
+        payload.checkout = { url: checkoutUrl };
+      }
+      return fetch(`${paddleApiBase}/transactions`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          items: [{ price_id: priceId, quantity: 1 }],
-          custom_data: {
-            userId,
-            plan,
-          },
-        }),
+        body: JSON.stringify(payload),
       });
+    };
+
+    try {
+      let paddleRes = await createPaddleTransaction(Boolean(checkoutUrl));
+
+      if (!paddleRes.ok && checkoutUrl) {
+        const firstErr = (await paddleRes.clone().json().catch(() => null)) as {
+          error?: { code?: string; detail?: string };
+        } | null;
+
+        if (firstErr?.error?.code === 'transaction_default_checkout_url_not_set' && !isLiveKey) {
+          // Attempt to auto-configure the Sandbox Default Payment Link if API key permits it
+          try {
+            const patchRes = await fetch(`${paddleApiBase}/settings/checkout-url`, {
+              method: 'PATCH',
+              headers: {
+                Authorization: `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ default_url: checkoutUrl }),
+            });
+            if (patchRes.ok) {
+              const retryAfterPatch = await createPaddleTransaction(true);
+              if (retryAfterPatch.ok) {
+                paddleRes = retryAfterPatch;
+              }
+            }
+          } catch {
+            // Fall through to structured fallback response if key lacks checkout_settings.write scope
+          }
+        } else if (
+          firstErr?.error?.code &&
+          firstErr.error.code !== 'transaction_default_checkout_url_not_set'
+        ) {
+          // If explicit checkout.url is rejected (e.g. unapproved domain), retry with account default link
+          const retryRes = await createPaddleTransaction(false);
+          if (retryRes.ok) {
+            paddleRes = retryRes;
+          }
+        }
+      }
 
       if (paddleRes.ok) {
         const paddleJson = (await paddleRes.json()) as { data?: { id?: string } };
@@ -133,6 +211,7 @@ billingRouter.post('/checkout', async (req, res) => {
         const errPayload = (await paddleRes.json().catch(() => null)) as {
           error?: { code?: string; detail?: string };
         } | null;
+        paddleErrorCode = errPayload?.error?.code;
         paddleFallbackReason =
           errPayload?.error?.detail ||
           `Paddle API returned HTTP ${paddleRes.status} (${errPayload?.error?.code || 'forbidden'}).`;
@@ -151,6 +230,8 @@ billingRouter.post('/checkout', async (req, res) => {
     transactionId,
     canOpenPaddleOverlay,
     paddleFallbackReason,
+    paddleErrorCode,
+    suggestedCheckoutUrl: checkoutUrl,
     amountCents,
     sandboxMode:
       provider === 'paddle'
@@ -176,7 +257,7 @@ billingRouter.post('/sandbox-complete', (req, res) => {
     provider?: 'stripe' | 'paddle';
   };
 
-  const amountCents = plan === 'pro' ? 2900 : 500;
+  const amountCents = plan === 'pro' ? 4000 : 500;
   const eventType =
     provider === 'paddle'
       ? plan === 'pro'
@@ -200,7 +281,7 @@ billingRouter.post('/sandbox-complete', (req, res) => {
     ok: true,
     message:
       plan === 'pro'
-        ? `Upgraded to DocuCleanse Pro ($29/mo) via ${provider === 'paddle' ? 'Paddle' : 'Stripe'} — unlimited cleans & exports unlocked.`
+        ? `Upgraded to DocuCleanse Pro ($40/mo) via ${provider === 'paddle' ? 'Paddle' : 'Stripe'} — unlimited cleans & exports unlocked.`
         : `Added 15 Pro-grade file clean tokens ($5 Token Pack) via ${provider === 'paddle' ? 'Paddle' : 'Stripe'}.`,
     quota,
   });
@@ -272,7 +353,7 @@ billingRouter.post('/webhook/paddle', (req, res) => {
       ? Number(rawTotal)
       : isTokenPack
       ? 500
-      : 2900;
+      : 4000;
 
   if (eventType === 'subscription.created' || eventType === 'subscription.activated') {
     const quota = applyBillingUpgrade({
@@ -357,7 +438,7 @@ billingRouter.post('/webhook/stripe', (req, res) => {
   const meta = event?.data?.object?.metadata;
   const userId = meta?.userId || resolveUserId(req);
   const tier = meta?.tier === 'token_pack' ? 'token_pack' : 'pro';
-  const amountCents = event?.data?.object?.amount_total ?? (tier === 'pro' ? 2900 : 500);
+  const amountCents = event?.data?.object?.amount_total ?? (tier === 'pro' ? 4000 : 500);
 
   if (eventType === 'checkout.session.completed' || eventType === 'invoice.paid') {
     const quota = applyBillingUpgrade({

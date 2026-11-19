@@ -59,7 +59,7 @@ export function enforceRowLimit(
       allowed: false,
       status: 402,
       payload: {
-        error: `This file contains ${rowCount} rows, which exceeds the Free tier cap of ${FREE_MAX_ROWS_PER_FILE} rows per file. Upgrade to Pro ($29/mo) or a $5 Token Pack for unlimited rows.`,
+        error: `This file contains ${rowCount} rows, which exceeds the Free tier cap of ${FREE_MAX_ROWS_PER_FILE} rows per file. Upgrade to Pro ($40/mo) or a $5 Token Pack for unlimited rows.`,
         code: 'ROW_LIMIT_EXCEEDED',
         upgradeRequired: true,
         rowCount,
