@@ -162,7 +162,10 @@ export default function App() {
     }
   };
 
-  const handleExport = async (jobId: string, format: 'csv' | 'xlsx' | 'pdf') => {
+  const handleExport = async (
+    jobId: string,
+    format: 'csv' | 'xlsx' | 'pdf' | 'certificate'
+  ) => {
     setBanner(null);
 
     const targetJob =
@@ -374,7 +377,11 @@ export default function App() {
                       </div>
                     </div>
 
-                    <AnomalyCards job={activeJob} />
+                    <AnomalyCards
+                      job={activeJob}
+                      onExport={handleExport}
+                      exportingFormat={exportingFormat}
+                    />
 
                     {(workspaceView === 'charts' || workspaceView === 'split') && (
                       <DataVisualizer job={activeJob} />

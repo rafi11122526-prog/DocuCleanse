@@ -3,7 +3,9 @@ import {
   AlertOctagon,
   BarChart3,
   Calendar,
-  DollarSign,
+  Coins,
+  Database,
+  Layers,
   Minimize2,
   PieChart,
   Presentation,
@@ -45,6 +47,44 @@ const SERIES_PALETTE = [
   '#64748B', // slate-500
 ];
 
+function detectCurrencyFromValue(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const s = raw.trim();
+  if (!s) return null;
+  if (/\bCAD\b|CA\$|(?:^|[\s(-])C\$/i.test(s)) return 'CAD';
+  if (/\bAUD\b|AU\$|(?:^|[\s(-])A\$/i.test(s)) return 'AUD';
+  if (/\bNZD\b|NZ\$/i.test(s)) return 'NZD';
+  if (/\bSGD\b|SG\$|(?:^|[\s(-])S\$/i.test(s)) return 'SGD';
+  if (/\bHKD\b|HK\$/i.test(s)) return 'HKD';
+  if (/£|\bGBP\b/i.test(s)) return 'GBP';
+  if (/€|\bEUR\b/i.test(s)) return 'EUR';
+  if (/¥|\bJPY\b/i.test(s)) return 'JPY';
+  if (/₹|\bINR\b/i.test(s)) return 'INR';
+  if (/\bCHF\b/i.test(s)) return 'CHF';
+  if (/\bPKR\b|\bRs\.?\b/i.test(s)) return 'PKR';
+  if (/\bAED\b/i.test(s)) return 'AED';
+  if (/\bSAR\b/i.test(s)) return 'SAR';
+  if (/\bUSD\b|US\$|\$/i.test(s)) return 'USD';
+  return null;
+}
+
+function currencyCodeToDisplayPrefix(code: string): string {
+  switch (code.toUpperCase()) {
+    case 'EUR':
+      return '€';
+    case 'GBP':
+      return '£';
+    case 'USD':
+      return '$';
+    case 'JPY':
+      return '¥';
+    case 'INR':
+      return '₹';
+    default:
+      return code.toUpperCase();
+  }
+}
+
 function parseNumericValue(raw: string | undefined): number | null {
   if (!raw) return null;
   const trimmed = raw.trim();
@@ -59,9 +99,9 @@ function parseNumericValue(raw: string | undefined): number | null {
   }
   const isParenNeg = /^\(.*\)$/.test(trimmed);
   let cleaned = trimmed
-    .replace(/\b(USD|EUR|GBP|CAD|AUD|JPY|CHF|NZD|SGD|HKD|PKR|INR)\b/gi, '')
-    .replace(/(CA\$|AU\$|US\$|NZ\$|HK\$|S\$|C\$|A\$|Rs\.?)/gi, '')
-    .replace(/[$€£¥₹\s()]/g, '');
+    .replace(/([-(\s\u00A0]|^)(?:CA|AU|US|NZ|HK|SG|C|A|S)\$/gi, '$1')
+    .replace(/\b(USD|EUR|GBP|CAD|AUD|JPY|CHF|NZD|SGD|HKD|PKR|INR|AED|SAR|RS\.?)\b/gi, '')
+    .replace(/[$€£¥₹₩₽\s\u00A0()]/g, '');
 
   // Handle European decimals (e.g., 1.250,50 or 450,00) vs US thousand commas (1,250.50)
   if (/^-?\d{1,3}(\.\d{3})*,\d{1,2}$/.test(cleaned) || /^-?\d+,\d{1,2}$/.test(cleaned)) {
@@ -76,25 +116,60 @@ function parseNumericValue(raw: string | undefined): number | null {
   return isParenNeg ? -Math.abs(num) : num;
 }
 
-function formatExecutiveCurrency(val: number): string {
-  return val.toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
+function formatExecutiveCurrency(val: number, currencies: string[] = []): string {
+  const sign = val < 0 ? '-' : '';
+  const absFormatted = Math.abs(val).toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+  if (currencies.length === 1) {
+    return `${sign}${currencyCodeToDisplayPrefix(currencies[0])} ${absFormatted}`;
+  }
+  return `${sign}${absFormatted}`;
 }
 
-function formatMetricValue(val: number, isCurrency: boolean, mode: AggregationMode): string {
+function formatCurrencyWithCode(val: number, code: string): string {
+  const sign = val < 0 ? '-' : '';
+  const absFormatted = Math.abs(val).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  const upper = code.toUpperCase();
+  const symMap: Record<string, string> = {
+    USD: '$',
+    EUR: '€',
+    GBP: '£',
+    JPY: '¥',
+    INR: '₹',
+    CAD: 'CA$',
+    AUD: 'A$',
+  };
+  const sym = symMap[upper];
+  if (sym) {
+    return `${sign}${sym}${absFormatted} ${upper}`;
+  }
+  return `${sign}${absFormatted} ${upper}`;
+}
+
+function formatMetricValue(
+  val: number,
+  isCurrency: boolean,
+  mode: AggregationMode,
+  currencies: string[] = []
+): string {
   if (mode === 'count') {
     return Math.round(val).toLocaleString('en-US');
   }
   if (isCurrency) {
-    return val.toLocaleString('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      maximumFractionDigits: Math.abs(val) >= 1000 ? 0 : 2,
+    const sign = val < 0 ? '-' : '';
+    const absFormatted = Math.abs(val).toLocaleString('en-US', {
+      minimumFractionDigits: Math.abs(val) >= 1000 ? 0 : 2,
+      maximumFractionDigits: 2,
     });
+    if (currencies.length === 1) {
+      return `${sign}${currencyCodeToDisplayPrefix(currencies[0])} ${absFormatted}`;
+    }
+    return `${sign}${absFormatted}`;
   }
   return val.toLocaleString('en-US', {
     maximumFractionDigits: 2,
@@ -204,16 +279,23 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
 
       // 2. Numeric / Currency column check
       const numericMatches = nonEmpty.filter((v) => parseNumericValue(v) !== null).length;
+      const hasCurrencyValues = nonEmpty.some((v) => detectCurrencyFromValue(v) !== null);
       const isRateOrPct = /tax[\s_-]?rate|\brate\b|_rate|pct|percent/.test(lower);
       const isCurrencyName =
         !isRateOrPct &&
         (lower === 'normalized_amount' ||
-          /amount|amt|total|price|cost|mrr|revenue|fee|balance|spend|budget/.test(lower));
+          /\b(amount|amt|total|price|cost|mrr|revenue|fee|balance|spend|budget|salary|pay|wage|invoice|subtotal)\b|total_amount|unit_price|line_total/.test(
+            lower
+          ));
+      const isCurrencyCol =
+        !isRateOrPct &&
+        lower !== 'currency_code' &&
+        (mappedType === 'currency' || isCurrencyName || hasCurrencyValues);
+
       if (
         lower !== 'currency_code' &&
-        (mappedType === 'currency' ||
+        (isCurrencyCol ||
           mappedType === 'number' ||
-          isCurrencyName ||
           (nonEmpty.length > 0 && numericMatches / nonEmpty.length >= 0.65))
       ) {
         const priority =
@@ -223,20 +305,20 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                 lower
               ) && !isRateOrPct
             ? 85
-            : isCurrencyName && !/unit[\s_-]?price|unit[\s_-]?cost/.test(lower)
+            : isCurrencyCol && !/unit[\s_-]?price|unit[\s_-]?cost/.test(lower)
             ? 70
-            : isCurrencyName
+            : isCurrencyCol
             ? 50
             : 20;
         numericCols.push({
           header,
-          isCurrency: !isRateOrPct && (mappedType === 'currency' || isCurrencyName),
+          isCurrency: isCurrencyCol,
           priority,
         });
         continue;
       }
 
-      // 3. Categorical column scoring (exclude phones/emails/long notes)
+      // 3. Categorical column scoring (exclude phones/emails/long notes/IDs)
       if (mappedType === 'phone' || mappedType === 'email' || /phone|email|note|id$/.test(lower)) {
         continue;
       }
@@ -246,9 +328,9 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
         let score = 1;
         if (lower === 'currency_code') {
           score += 6;
-        } else if (/category|cat|department|dept|region|status|stat|type|method|currency/.test(lower)) {
+        } else if (/category|cat|department|dept|region|status|stat|type|method|role|stage|country|city|team|tier|currency/.test(lower)) {
           score += 5;
-        } else if (/vendor|merchant|payee|client|company|product/.test(lower)) {
+        } else if (/vendor|merchant|payee|client|company|product|warehouse|owner|manager/.test(lower)) {
           score += 3;
         }
         // Prefer columns with clean grouping cardinality
@@ -262,7 +344,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     numericCols.sort((a, b) => b.priority - a.priority);
     categoricalCols.sort((a, b) => b.score - a.score);
 
-    // Fallback: if no categorical columns scored, include any non-numeric header
+    // Fallback: if no categorical columns scored, include any non-numeric header present in job.cleanedHeaders
     const fallbackCategories =
       categoricalCols.length > 0
         ? categoricalCols.map((c) => c.header)
@@ -270,11 +352,14 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
             (h) => h !== 'raw_amount' && !numericCols.some((n) => n.header === h) && !dateCols.includes(h)
           );
 
+    const hasFinancialColumn = numericCols.some((c) => c.isCurrency);
+
     return {
       numericCols,
       dateCols,
       categoricalCols:
         fallbackCategories.length > 0 ? fallbackCategories : job.cleanedHeaders,
+      hasFinancialColumn,
     };
   }, [job]);
 
@@ -342,23 +427,34 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     let negativeExposure = 0;
     let computedInputSum = 0;
     const currencySet = new Set<string>(job.auditMetadata?.detectedCurrencies ?? []);
+    const currencyPositiveTotals = new Map<string, number>();
+
+    const rawTotalKey = findHeader(
+      rawHeaders,
+      /(total[\s_-]?amount|line[\s_-]?total|total|amount|revenue|mrr|balance)/i,
+      /unit[\s_-]?price|tax|rate/i
+    );
 
     const rowCount = Math.max(job.cleanedRows.length, job.rawRows.length);
     for (let i = 0; i < rowCount; i++) {
       const cleanRow = job.cleanedRows[i] || {};
       const rawRow = job.rawRows[i] || {};
 
-      // 1. Try reading a valid normalized transaction total from candidate total columns
+      // 1. Try reading a valid normalized transaction total from candidate total columns (preferring non-zero values)
       let rowAmount: number | null = null;
+      let sawExplicitZero = false;
       for (const col of candidateTotalCols) {
         const parsed = parseNumericValue(cleanRow[col]);
         if (parsed !== null) {
-          rowAmount = parsed;
-          break;
+          if (parsed !== 0) {
+            rowAmount = parsed;
+            break;
+          }
+          sawExplicitZero = true;
         }
       }
 
-      // 2. Fallback or verify via (quantity * unit_price) when total_amount is missing/uncalculated/formula-error
+      // 2. Compute (quantity * unit_price) whenever total_amount is missing, uncalculated, error, or 0 while qty*price is non-zero
       const qtyVal =
         (qtyCol ? parseNumericValue(cleanRow[qtyCol]) : null) ??
         (rawQtyCol ? parseNumericValue(rawRow[rawQtyCol]) : null);
@@ -368,45 +464,104 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
 
       if (qtyVal !== null && unitPriceVal !== null) {
         const computedLine = Number((qtyVal * unitPriceVal).toFixed(2));
-        const rawAmtField = String(cleanRow.raw_amount ?? '').trim();
-        const wasUncalculatedOrZero =
-          rowAmount === null ||
-          (rowAmount === 0 &&
-            computedLine !== 0 &&
-            (!rawAmtField || rawAmtField.startsWith('=')));
-        if (wasUncalculatedOrZero) {
+        if (rowAmount === null && computedLine !== 0) {
+          rowAmount = computedLine;
+        } else if (rowAmount === null && !sawExplicitZero) {
           rowAmount = computedLine;
         }
       }
 
-      // 3. Final fallback to first numeric currency column if still null
+      // 3. Fallback to raw total column if cleaned total was empty/unparsed
+      if (rowAmount === null && rawTotalKey) {
+        const rawParsed = parseNumericValue(rawRow[rawTotalKey]);
+        if (rawParsed !== null && rawParsed !== 0) {
+          rowAmount = rawParsed;
+        }
+      }
+
+      // 4. Final fallback to first numeric currency column or explicit zero
       if (rowAmount === null && primaryCol) {
         rowAmount = parseNumericValue(cleanRow[primaryCol]);
+      }
+      if (rowAmount === null && sawExplicitZero) {
+        rowAmount = 0;
+      }
+
+      // Detect row-level ISO currency code without defaulting to USD
+      let rowCurrency: string | null = null;
+      const curField = String(cleanRow.currency_code ?? '').trim().toUpperCase();
+      if (curField && curField !== 'N/A') {
+        rowCurrency = curField;
+      } else {
+        for (const col of candidateTotalCols) {
+          const c = detectCurrencyFromValue(cleanRow[col]);
+          if (c) {
+            rowCurrency = c;
+            break;
+          }
+        }
+        if (!rowCurrency && unitPriceCol) {
+          rowCurrency = detectCurrencyFromValue(cleanRow[unitPriceCol]);
+        }
+        if (!rowCurrency && rawTotalKey) {
+          rowCurrency = detectCurrencyFromValue(rawRow[rawTotalKey]);
+        }
+        if (!rowCurrency && rawUnitPriceCol) {
+          rowCurrency = detectCurrencyFromValue(rawRow[rawUnitPriceCol]);
+        }
+      }
+
+      if (rowCurrency) {
+        currencySet.add(rowCurrency);
       }
 
       if (rowAmount !== null) {
         netTotal += rowAmount;
         if (rowAmount > 0) {
           grossInflow += rowAmount;
+          if (rowCurrency) {
+            currencyPositiveTotals.set(
+              rowCurrency,
+              Number(((currencyPositiveTotals.get(rowCurrency) ?? 0) + rowAmount).toFixed(2))
+            );
+          }
         } else if (rowAmount < 0) {
           negativeExposure += Math.abs(rowAmount);
         }
       }
 
       // Track raw input sum for fallback variance display on legacy jobs
-      const rawTotalKey = findHeader(
-        rawHeaders,
-        /(total[\s_-]?amount|line[\s_-]?total|total|amount|revenue|mrr|balance)/i,
-        /unit[\s_-]?price|tax|rate/i
-      );
       if (rawTotalKey) {
         const rawNum = parseNumericValue(rawRow[rawTotalKey]);
         if (rawNum !== null) computedInputSum += rawNum;
       }
-
-      const cur = String(cleanRow.currency_code ?? '').trim();
-      if (cur) currencySet.add(cur);
     }
+
+    const currencyBreakdown = Array.from(currencyPositiveTotals.entries())
+      .map(([code, total]) => ({ code, total }))
+      .sort((a, b) => b.total - a.total);
+
+    // Compute Unique Entities count for non-financial / operational datasets
+    const uniqueEntityCol =
+      job.cleanedHeaders.find((h) =>
+        /(student|employee|emp|member|client|customer|person|assignee|full[\s_-]?name|name|email|entity)/i.test(
+          h
+        )
+      ) ||
+      job.cleanedHeaders.find((h) => /\bid\b|_id$/i.test(h)) ||
+      detectedSchema.categoricalCols[0] ||
+      job.cleanedHeaders[0] ||
+      '';
+    const uniqueEntitySet = new Set<string>();
+    if (uniqueEntityCol) {
+      for (const row of job.cleanedRows) {
+        const val = String(row[uniqueEntityCol] ?? '').trim();
+        if (val && val !== '[MISSING]') {
+          uniqueEntitySet.add(val.toLowerCase());
+        }
+      }
+    }
+    const uniqueEntitiesCount = uniqueEntitySet.size;
 
     // Fallback leakage calculation if auditMetadata isn't present on legacy jobs
     let formulaRepairValue = 0;
@@ -422,9 +577,14 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     }
 
     const leakageValue =
-      job.auditMetadata?.leakageRecoveredValue !== undefined
+      job.auditMetadata?.leakageRecoveredValue !== undefined &&
+      (job.auditMetadata.leakageRecoveredValue > 0 || (formulaRepairValue === 0 && negativeExposure === 0))
         ? job.auditMetadata.leakageRecoveredValue
         : Number((formulaRepairValue + negativeExposure).toFixed(2));
+
+    const effectiveLeakageOrRefunds = Math.max(leakageValue, negativeExposure);
+    const roundedGross = Number(grossInflow.toFixed(2));
+    const netVarianceInflow = Number((roundedGross - effectiveLeakageOrRefunds).toFixed(2));
 
     const totalCells = Math.max(1, job.cleanedRows.length * Math.max(1, job.rawHeaders.length));
     const unresolvedCount = job.cleanedRows.reduce(
@@ -456,11 +616,16 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
         : Number((resolvedOutputSum - resolvedInputSum).toFixed(2));
 
     return {
-      grossInflow: Number(grossInflow.toFixed(2)),
+      hasFinancialColumn: detectedSchema.hasFinancialColumn,
+      grossInflow: roundedGross,
       netTotal: roundedNet,
-      leakageValue,
+      netVarianceInflow,
+      leakageValue: Number(effectiveLeakageOrRefunds.toFixed(2)),
       confidenceScore,
       currencies: Array.from(currencySet),
+      currencyBreakdown,
+      uniqueEntitiesCount,
+      uniqueEntityCol,
       primaryCol,
       criticalFinancialCount,
       rowsIngested: job.auditMetadata?.rowsIngested ?? job.rowCount,
@@ -481,7 +646,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
         ? `${job.auditMetadata.fileHashSha256.slice(0, 12)}…${job.auditMetadata.fileHashSha256.slice(-8)}`
         : 'Legacy Record',
     };
-  }, [job, detectedSchema.numericCols]);
+  }, [job, detectedSchema.numericCols, detectedSchema.categoricalCols, detectedSchema.hasFinancialColumn]);
 
   const [selectedCategory, setSelectedCategory] = useState<string>(
     detectedSchema.categoricalCols[0] || job.cleanedHeaders[0] || ''
@@ -502,31 +667,40 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     setHoveredIndex(null);
   }, [job.id, detectedSchema, job.cleanedHeaders]);
 
+  // Strictly ground selected dropdown fields to columns that exist in the active dataset
+  const effectiveCategory = detectedSchema.categoricalCols.includes(selectedCategory)
+    ? selectedCategory
+    : detectedSchema.categoricalCols[0] || job.cleanedHeaders[0] || '';
+
+  const effectiveNumeric = detectedSchema.numericCols.some((n) => n.header === selectedNumeric)
+    ? selectedNumeric
+    : detectedSchema.numericCols[0]?.header || '';
+
   const activeNumericMeta = useMemo(
-    () => detectedSchema.numericCols.find((n) => n.header === selectedNumeric),
-    [detectedSchema.numericCols, selectedNumeric]
+    () => detectedSchema.numericCols.find((n) => n.header === effectiveNumeric),
+    [detectedSchema.numericCols, effectiveNumeric]
   );
 
   const effectiveAggregation: AggregationMode =
-    !selectedNumeric || aggregation === 'count' ? 'count' : aggregation;
+    !effectiveNumeric || aggregation === 'count' ? 'count' : aggregation;
   const isCurrencyMetric =
     effectiveAggregation !== 'count' && Boolean(activeNumericMeta?.isCurrency);
 
   // Grouped categorical data for Bar & Donut charts
   const groupedData = useMemo<AggregatedDatum[]>(() => {
-    if (!selectedCategory) return [];
+    if (!effectiveCategory) return [];
 
     const buckets = new Map<string, { sum: number; count: number }>();
     for (const row of job.cleanedRows) {
-      const rawGroup = String(row[selectedCategory] ?? '').trim();
+      const rawGroup = String(row[effectiveCategory] ?? '').trim();
       const label =
         !rawGroup || rawGroup === '[MISSING]' ? 'Unspecified' : rawGroup;
 
       const entry = buckets.get(label) || { sum: 0, count: 0 };
       entry.count += 1;
 
-      if (effectiveAggregation !== 'count' && selectedNumeric) {
-        const num = parseNumericValue(row[selectedNumeric]);
+      if (effectiveAggregation !== 'count' && effectiveNumeric) {
+        const num = parseNumericValue(row[effectiveNumeric]);
         if (num !== null) {
           entry.sum += num;
         }
@@ -553,7 +727,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
       ...item,
       color: SERIES_PALETTE[idx % SERIES_PALETTE.length],
     }));
-  }, [job.cleanedRows, selectedCategory, selectedNumeric, effectiveAggregation]);
+  }, [job.cleanedRows, effectiveCategory, effectiveNumeric, effectiveAggregation]);
 
   const totalGroupedValue = useMemo(
     () => groupedData.reduce((acc, d) => acc + Math.max(0, d.value), 0),
@@ -572,8 +746,8 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
       const dateKey = dt.slice(0, 10);
       const entry = buckets.get(dateKey) || { sum: 0, count: 0 };
       entry.count += 1;
-      if (effectiveAggregation !== 'count' && selectedNumeric) {
-        const num = parseNumericValue(row[selectedNumeric]);
+      if (effectiveAggregation !== 'count' && effectiveNumeric) {
+        const num = parseNumericValue(row[effectiveNumeric]);
         if (num !== null) entry.sum += num;
       }
       buckets.set(dateKey, entry);
@@ -593,7 +767,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
           ).toFixed(2)
         ),
       }));
-  }, [activeDateCol, job.cleanedRows, effectiveAggregation, selectedNumeric]);
+  }, [activeDateCol, job.cleanedRows, effectiveAggregation, effectiveNumeric]);
 
   // Anomaly distribution data
   const anomalyStats = useMemo(() => {
@@ -637,42 +811,57 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     return m === 0 ? 1 : m;
   }, [groupedData]);
 
-  const executiveKpiStrip = (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+  const executiveKpiStrip = executiveKpis.hasFinancialColumn ? (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
       {/* KPI 1: Total Revenue / Gross Inflow */}
       <div
         className={`rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 ${
-          isBoardMode ? 'p-6' : 'p-4'
+          isBoardMode ? 'p-6 dark:border-slate-700/80 dark:bg-slate-900/95' : 'p-4'
         }`}
       >
         <div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
           <span>Total Revenue / Gross Inflow</span>
-          <DollarSign className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0" />
+          <Coins className="h-4 w-4 text-blue-600 dark:text-sky-400 shrink-0" />
         </div>
         <div
-          className={`mt-2 font-mono font-semibold tabular-nums text-slate-900 dark:text-slate-100 ${
-            isBoardMode ? 'text-3xl' : 'text-2xl'
+          className={`mt-2 font-mono font-semibold tabular-nums text-slate-900 dark:text-white ${
+            isBoardMode ? 'text-3xl tracking-tight' : 'text-2xl'
           }`}
         >
-          {formatExecutiveCurrency(executiveKpis.grossInflow)}
+          {formatExecutiveCurrency(executiveKpis.grossInflow, executiveKpis.currencies)}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-          <span>Net: {formatExecutiveCurrency(executiveKpis.netTotal)}</span>
-          {executiveKpis.currencies.length > 0 && (
+          <span>
+            Net Variance / Inflow:{' '}
+            <strong className="font-mono font-semibold text-slate-700 dark:text-slate-200">
+              {formatExecutiveCurrency(executiveKpis.netVarianceInflow, executiveKpis.currencies)}
+            </strong>
+          </span>
+          {executiveKpis.currencies.length === 1 && (
             <>
               <span aria-hidden="true">·</span>
-              <span className="font-mono text-[11px]">
-                {executiveKpis.currencies.join(' · ')}
-              </span>
+              <span className="font-mono text-[11px]">{executiveKpis.currencies[0]}</span>
             </>
           )}
         </div>
+        {executiveKpis.currencyBreakdown.length > 1 && (
+          <div className="mt-2.5 rounded-lg border border-slate-200/80 dark:border-slate-700/80 bg-slate-50 dark:bg-slate-800/80 px-3 py-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              Multi-Currency Summary
+            </div>
+            <div className="mt-0.5 font-mono text-[11px] font-medium text-slate-800 dark:text-slate-100 tabular-nums leading-relaxed">
+              {executiveKpis.currencyBreakdown
+                .map((c) => formatCurrencyWithCode(c.total, c.code))
+                .join(' · ')}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* KPI 2: Identified Leakage / Anomaly Value */}
       <div
         className={`rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 ${
-          isBoardMode ? 'p-6' : 'p-4'
+          isBoardMode ? 'p-6 dark:border-slate-700/80 dark:bg-slate-900/95' : 'p-4'
         }`}
       >
         <div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
@@ -690,9 +879,9 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
             executiveKpis.leakageValue > 0
               ? 'text-amber-600 dark:text-amber-400'
               : 'text-emerald-600 dark:text-emerald-400'
-          } ${isBoardMode ? 'text-3xl' : 'text-2xl'}`}
+          } ${isBoardMode ? 'text-3xl tracking-tight' : 'text-2xl'}`}
         >
-          {formatExecutiveCurrency(executiveKpis.leakageValue)}
+          {formatExecutiveCurrency(executiveKpis.leakageValue, executiveKpis.currencies)}
         </div>
         <div className="mt-1.5 text-xs text-slate-500 dark:text-slate-400 tabular-nums">
           {executiveKpis.leakageValue > 0
@@ -704,7 +893,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
       {/* KPI 3: Reconciliation Confidence Score */}
       <div
         className={`rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 ${
-          isBoardMode ? 'p-6' : 'p-4'
+          isBoardMode ? 'p-6 dark:border-slate-700/80 dark:bg-slate-900/95' : 'p-4'
         }`}
       >
         <div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
@@ -713,7 +902,77 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
         </div>
         <div
           className={`mt-2 font-mono font-semibold tabular-nums text-emerald-600 dark:text-emerald-400 ${
-            isBoardMode ? 'text-3xl' : 'text-2xl'
+            isBoardMode ? 'text-3xl tracking-tight' : 'text-2xl'
+          }`}
+        >
+          {executiveKpis.confidenceScore.toFixed(1)}% Cleaned
+        </div>
+        <div className="mt-1.5 text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+          Checksum {executiveKpis.rowsIngested}/{executiveKpis.rowsCleaned} rows ·{' '}
+          {executiveKpis.rowChecksumMatch ? 'Verified Match' : 'Variance Flagged'}
+        </div>
+      </div>
+    </div>
+  ) : (
+    /* Non-Financial Dataset Adaptive KPI Strip (No Gross Inflow, Leakage, or Monetary Metrics) */
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+      <div
+        className={`rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 ${
+          isBoardMode ? 'p-6 dark:border-slate-700/80 dark:bg-slate-900/95' : 'p-4'
+        }`}
+      >
+        <div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          <span>Total Records Ingested</span>
+          <Database className="h-4 w-4 text-blue-600 dark:text-sky-400 shrink-0" />
+        </div>
+        <div
+          className={`mt-2 font-mono font-semibold tabular-nums text-slate-900 dark:text-white ${
+            isBoardMode ? 'text-3xl tracking-tight' : 'text-2xl'
+          }`}
+        >
+          {executiveKpis.rowsIngested.toLocaleString('en-US')}
+        </div>
+        <div className="mt-1.5 text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+          {executiveKpis.rowsCleaned.toLocaleString('en-US')} normalized · {job.cleanedHeaders.length} columns
+        </div>
+      </div>
+
+      <div
+        className={`rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 ${
+          isBoardMode ? 'p-6 dark:border-slate-700/80 dark:bg-slate-900/95' : 'p-4'
+        }`}
+      >
+        <div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          <span>Unique Entities</span>
+          <Layers className="h-4 w-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+        </div>
+        <div
+          className={`mt-2 font-mono font-semibold tabular-nums text-slate-900 dark:text-white ${
+            isBoardMode ? 'text-3xl tracking-tight' : 'text-2xl'
+          }`}
+        >
+          {executiveKpis.uniqueEntitiesCount.toLocaleString('en-US')}
+        </div>
+        <div className="mt-1.5 text-xs text-slate-500 dark:text-slate-400 truncate">
+          Distinct records in{' '}
+          <span className="font-mono text-slate-700 dark:text-slate-300">
+            {executiveKpis.uniqueEntityCol || effectiveCategory || 'primary field'}
+          </span>
+        </div>
+      </div>
+
+      <div
+        className={`rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 ${
+          isBoardMode ? 'p-6 dark:border-slate-700/80 dark:bg-slate-900/95' : 'p-4'
+        }`}
+      >
+        <div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          <span>Reconciliation Confidence Score</span>
+          <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+        </div>
+        <div
+          className={`mt-2 font-mono font-semibold tabular-nums text-emerald-600 dark:text-emerald-400 ${
+            isBoardMode ? 'text-3xl tracking-tight' : 'text-2xl'
           }`}
         >
           {executiveKpis.confidenceScore.toFixed(1)}% Cleaned
@@ -726,6 +985,9 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     </div>
   );
 
+  const effectiveChartType: ChartViewType =
+    chartType === 'trend' && detectedSchema.dateCols.length === 0 ? 'bar' : chartType;
+
   const chartPanel = (
     <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
       {/* Header & Controls */}
@@ -737,11 +999,13 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                 { id: 'bar', label: 'Bar Chart', icon: BarChart3 },
                 { id: 'donut', label: 'Pie / Donut', icon: PieChart },
                 { id: 'anomalies', label: 'Anomaly Distribution', icon: ShieldAlert },
-                { id: 'trend', label: 'Trend / Line', icon: TrendingUp },
+                ...(detectedSchema.dateCols.length > 0
+                  ? [{ id: 'trend' as const, label: 'Trend / Line', icon: TrendingUp }]
+                  : []),
               ] as const
             ).map((tab) => {
               const Icon = tab.icon;
-              const active = chartType === tab.id;
+              const active = effectiveChartType === tab.id;
               return (
                 <button
                   key={tab.id}
@@ -766,14 +1030,14 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
 
         {/* Dynamic Column, Aggregation & Board Presentation Controls */}
         <div className="flex flex-wrap items-center gap-2.5 text-xs">
-          {chartType !== 'anomalies' && (
+          {effectiveChartType !== 'anomalies' && (
             <>
-              {(chartType === 'bar' || chartType === 'donut') &&
+              {(effectiveChartType === 'bar' || effectiveChartType === 'donut') &&
                 detectedSchema.categoricalCols.length > 0 && (
                   <label className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
                     <span className="whitespace-nowrap">Group by</span>
                     <select
-                      value={selectedCategory}
+                      value={effectiveCategory}
                       onChange={(e) => {
                         setSelectedCategory(e.target.value);
                         setHoveredIndex(null);
@@ -793,7 +1057,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                 <label className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
                   <span className="whitespace-nowrap">Metric</span>
                   <select
-                    value={selectedNumeric}
+                    value={effectiveNumeric}
                     onChange={(e) => {
                       setSelectedNumeric(e.target.value);
                       setHoveredIndex(null);
@@ -809,35 +1073,33 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                 </label>
               )}
 
-              <div className="flex items-center gap-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5">
-                {(
-                  [
-                    ...(detectedSchema.numericCols.length > 0
-                      ? [
-                          { id: 'sum' as const, label: 'Sum' },
-                          { id: 'avg' as const, label: 'Avg' },
-                        ]
-                      : []),
-                    { id: 'count' as const, label: 'Count' },
-                  ] as const
-                ).map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => {
-                      setAggregation(m.id);
-                      setHoveredIndex(null);
-                    }}
-                    className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 ${
-                      effectiveAggregation === m.id
-                        ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
-                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                    }`}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
+              {detectedSchema.numericCols.length > 0 && (
+                <div className="flex items-center gap-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 p-0.5">
+                  {(
+                    [
+                      { id: 'sum' as const, label: 'Sum' },
+                      { id: 'avg' as const, label: 'Avg' },
+                      { id: 'count' as const, label: 'Count' },
+                    ] as const
+                  ).map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => {
+                        setAggregation(m.id);
+                        setHoveredIndex(null);
+                      }}
+                      className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 ${
+                        effectiveAggregation === m.id
+                          ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                      }`}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </>
           )}
 
@@ -857,7 +1119,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
       {/* Chart Canvas Area */}
       <div className={isBoardMode ? 'p-7' : 'p-5'}>
         {/* 1. BAR CHART */}
-        {chartType === 'bar' && (
+        {effectiveChartType === 'bar' && (
           <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
               <span>
@@ -865,11 +1127,11 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                 <span className="font-semibold text-slate-900 dark:text-slate-100">
                   {effectiveAggregation === 'count'
                     ? 'Row Frequency'
-                    : `${effectiveAggregation === 'avg' ? 'Average' : 'Total'} ${selectedNumeric}`}
+                    : `${effectiveAggregation === 'avg' ? 'Average' : 'Total'} ${effectiveNumeric}`}
                 </span>{' '}
                 grouped by{' '}
                 <span className="font-mono text-slate-800 dark:text-slate-200">
-                  {selectedCategory || 'group'}
+                  {effectiveCategory || 'group'}
                 </span>
               </span>
               {hoveredIndex !== null && groupedData[hoveredIndex] && (
@@ -878,7 +1140,8 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                   {formatMetricValue(
                     groupedData[hoveredIndex].value,
                     isCurrencyMetric,
-                    effectiveAggregation
+                    effectiveAggregation,
+                    executiveKpis.currencies
                   )}{' '}
                   ({groupedData[hoveredIndex].count} rows)
                 </span>
@@ -914,13 +1177,19 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                       }`}
                     >
                       <div
-                        className="col-span-4 sm:col-span-3 truncate text-xs font-medium text-slate-700 dark:text-slate-200"
+                        className={`col-span-4 sm:col-span-3 truncate font-medium text-slate-700 dark:text-slate-100 ${
+                          isBoardMode ? 'text-sm' : 'text-xs'
+                        }`}
                         title={item.label}
                       >
                         {item.label}
                       </div>
 
-                      <div className="col-span-5 sm:col-span-6 h-5 rounded-md bg-slate-100 dark:bg-slate-800 overflow-hidden flex items-center">
+                      <div
+                        className={`col-span-5 sm:col-span-6 rounded-md bg-slate-100 dark:bg-slate-800 overflow-hidden flex items-center ${
+                          isBoardMode ? 'h-7' : 'h-5'
+                        }`}
+                      >
                         <div
                           className="h-full rounded-md transition-all duration-300"
                           style={{
@@ -931,9 +1200,18 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                         />
                       </div>
 
-                      <div className="col-span-3 text-right font-mono text-xs tabular-nums text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                        {formatMetricValue(item.value, isCurrencyMetric, effectiveAggregation)}
-                        <span className="hidden sm:inline text-[11px] text-slate-400 dark:text-slate-500 ml-1.5">
+                      <div
+                        className={`col-span-3 text-right font-mono tabular-nums text-slate-900 dark:text-white whitespace-nowrap ${
+                          isBoardMode ? 'text-sm font-semibold' : 'text-xs'
+                        }`}
+                      >
+                        {formatMetricValue(
+                          item.value,
+                          isCurrencyMetric,
+                          effectiveAggregation,
+                          executiveKpis.currencies
+                        )}
+                        <span className="hidden sm:inline text-[11px] text-slate-400 dark:text-slate-400 ml-1.5 font-normal">
                           ({share}%)
                         </span>
                       </div>
@@ -946,7 +1224,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
         )}
 
         {/* 2. PIE / DONUT CHART */}
-        {chartType === 'donut' && (
+        {effectiveChartType === 'donut' && (
           <div className="grid grid-cols-1 md:grid-cols-12 items-center gap-6">
             <div className="md:col-span-5 flex flex-col items-center justify-center relative">
               {groupedData.length === 0 || totalGroupedValue <= 0 ? (
@@ -954,12 +1232,12 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                   No positive numeric or count values to display.
                 </div>
               ) : (
-                <div className="relative w-56 h-56">
+                <div className={`relative ${isBoardMode ? 'w-72 h-72' : 'w-56 h-56'}`}>
                   <svg
                     viewBox="0 0 220 220"
                     className="w-full h-full overflow-visible"
                     role="img"
-                    aria-label={`Donut distribution by ${selectedCategory}`}
+                    aria-label={`Donut distribution by ${effectiveCategory}`}
                   >
                     {(() => {
                       let angleCursor = 0;
@@ -996,22 +1274,32 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
 
                   {/* Center Readout */}
                   <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center px-6">
-                    <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate max-w-[100px]">
+                    <span
+                      className={`font-medium text-slate-500 dark:text-slate-300 truncate max-w-[120px] ${
+                        isBoardMode ? 'text-xs' : 'text-[11px]'
+                      }`}
+                    >
                       {hoveredIndex !== null && groupedData[hoveredIndex]
                         ? groupedData[hoveredIndex].label
                         : 'Total'}
                     </span>
-                    <span className="font-mono text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100">
+                    <span
+                      className={`font-mono font-bold tabular-nums text-slate-900 dark:text-white ${
+                        isBoardMode ? 'text-lg' : 'text-sm'
+                      }`}
+                    >
                       {hoveredIndex !== null && groupedData[hoveredIndex]
                         ? formatMetricValue(
                             groupedData[hoveredIndex].value,
                             isCurrencyMetric,
-                            effectiveAggregation
+                            effectiveAggregation,
+                            executiveKpis.currencies
                           )
                         : formatMetricValue(
                             totalGroupedValue,
                             isCurrencyMetric,
-                            effectiveAggregation
+                            effectiveAggregation,
+                            executiveKpis.currencies
                           )}
                     </span>
                   </div>
@@ -1020,7 +1308,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
             </div>
 
             {/* Interactive Legend */}
-            <div className="md:col-span-7 divide-y divide-slate-100 dark:divide-slate-800 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+            <div className="md:col-span-7 divide-y divide-slate-100 dark:divide-slate-800 border border-slate-200 dark:border-slate-700/80 rounded-lg overflow-hidden">
               {groupedData.map((slice, idx) => {
                 const share =
                   totalGroupedValue > 0
@@ -1032,30 +1320,37 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                     key={slice.label}
                     onMouseEnter={() => setHoveredIndex(idx)}
                     onMouseLeave={() => setHoveredIndex(null)}
-                    className={`flex items-center justify-between gap-3 px-3.5 py-2 text-xs transition-colors cursor-default ${
+                    className={`flex items-center justify-between gap-3 transition-colors cursor-default ${
+                      isBoardMode ? 'px-4 py-3 text-sm' : 'px-3.5 py-2 text-xs'
+                    } ${
                       isHovered
-                        ? 'bg-slate-50 dark:bg-slate-800/70'
+                        ? 'bg-slate-50 dark:bg-slate-800'
                         : 'bg-white dark:bg-slate-900'
                     }`}
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
                       <span
-                        className="h-2.5 w-2.5 rounded-xs shrink-0"
+                        className="h-3 w-3 rounded-xs shrink-0"
                         style={{ backgroundColor: slice.color }}
                       />
-                      <span className="font-medium text-slate-800 dark:text-slate-200 truncate">
+                      <span className="font-medium text-slate-800 dark:text-slate-100 truncate">
                         {slice.label}
                       </span>
-                      <span className="text-[11px] text-slate-400 dark:text-slate-500 tabular-nums shrink-0">
+                      <span className="text-[11px] text-slate-400 dark:text-slate-400 tabular-nums shrink-0">
                         ({slice.count} rows)
                       </span>
                     </div>
 
                     <div className="flex items-center gap-3 font-mono tabular-nums shrink-0">
-                      <span className="font-semibold text-slate-900 dark:text-slate-100">
-                        {formatMetricValue(slice.value, isCurrencyMetric, effectiveAggregation)}
+                      <span className="font-semibold text-slate-900 dark:text-white">
+                        {formatMetricValue(
+                          slice.value,
+                          isCurrencyMetric,
+                          effectiveAggregation,
+                          executiveKpis.currencies
+                        )}
                       </span>
-                      <span className="w-12 text-right text-slate-500 dark:text-slate-400">
+                      <span className="w-12 text-right text-slate-500 dark:text-slate-300">
                         {share}%
                       </span>
                     </div>
@@ -1067,7 +1362,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
         )}
 
         {/* 3. ANOMALY DISTRIBUTION */}
-        {chartType === 'anomalies' && (
+        {effectiveChartType === 'anomalies' && (
           <div className="grid grid-cols-1 md:grid-cols-12 items-center gap-6">
             <div className="md:col-span-5 flex flex-col items-center justify-center">
               {anomalyStats.total === 0 ? (
@@ -1200,7 +1495,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
         )}
 
         {/* 4. TREND / LINE CHART */}
-        {chartType === 'trend' && (
+        {effectiveChartType === 'trend' && (
           <div>
             {!activeDateCol || trendData.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center space-y-2">
@@ -1224,7 +1519,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                     <span className="font-semibold text-slate-900 dark:text-slate-100">
                       {effectiveAggregation === 'count'
                         ? 'Entries per day'
-                        : `${selectedNumeric} (${effectiveAggregation})`}
+                        : `${effectiveNumeric} (${effectiveAggregation})`}
                     </span>
                   </span>
                   {hoveredIndex !== null && trendData[hoveredIndex] && (
@@ -1233,7 +1528,8 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                       {formatMetricValue(
                         trendData[hoveredIndex].value,
                         isCurrencyMetric,
-                        effectiveAggregation
+                        effectiveAggregation,
+                        executiveKpis.currencies
                       )}{' '}
                       ({trendData[hoveredIndex].count} rows)
                     </span>
@@ -1280,14 +1576,22 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                     <div className="w-full overflow-x-auto">
                       <svg
                         viewBox={`0 0 ${W} ${H}`}
-                        className="w-full min-w-[520px] h-56"
+                        className={`w-full min-w-[520px] ${isBoardMode ? 'h-80' : 'h-56'}`}
                         role="img"
                         aria-label="Chronological trend line chart"
                       >
                         <defs>
                           <linearGradient id="docucleanseTrendFill" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0%" stopColor="#2563EB" stopOpacity="0.22" />
-                            <stop offset="100%" stopColor="#2563EB" stopOpacity="0.01" />
+                            <stop
+                              offset="0%"
+                              stopColor={isBoardMode ? '#38BDF8' : '#2563EB'}
+                              stopOpacity={isBoardMode ? '0.32' : '0.22'}
+                            />
+                            <stop
+                              offset="100%"
+                              stopColor={isBoardMode ? '#38BDF8' : '#2563EB'}
+                              stopOpacity="0.01"
+                            />
                           </linearGradient>
                         </defs>
 
@@ -1300,16 +1604,21 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                               y1={tk.y}
                               y2={tk.y}
                               stroke="currentColor"
-                              className="text-slate-200 dark:text-slate-800"
+                              className="text-slate-200 dark:text-slate-700/80"
                               strokeDasharray="3 3"
                             />
                             <text
                               x={padL - 8}
                               y={tk.y + 4}
                               textAnchor="end"
-                              className="fill-slate-400 dark:fill-slate-500 text-[10px] font-mono"
+                              className="fill-slate-500 dark:fill-slate-300 text-[10px] font-mono"
                             >
-                              {formatMetricValue(tk.val, isCurrencyMetric, effectiveAggregation)}
+                              {formatMetricValue(
+                                tk.val,
+                                isCurrencyMetric,
+                                effectiveAggregation,
+                                executiveKpis.currencies
+                              )}
                             </text>
                           </g>
                         ))}
@@ -1321,8 +1630,8 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                         <path
                           d={linePath}
                           fill="none"
-                          stroke="#2563EB"
-                          strokeWidth="2.25"
+                          stroke={isBoardMode ? '#38BDF8' : '#2563EB'}
+                          strokeWidth={isBoardMode ? '2.75' : '2.25'}
                           strokeLinecap="round"
                           strokeLinejoin="round"
                         />
@@ -1346,8 +1655,10 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                               <circle
                                 cx={pt.x}
                                 cy={pt.y}
-                                r={isHovered ? 6 : 4}
-                                className="fill-white dark:fill-slate-900 stroke-blue-600 transition-all duration-150"
+                                r={isHovered ? 6.5 : 4.25}
+                                className={`fill-white dark:fill-slate-950 transition-all duration-150 ${
+                                  isBoardMode ? 'stroke-sky-400' : 'stroke-blue-600'
+                                }`}
                                 strokeWidth={isHovered ? 3 : 2}
                               />
                               <circle cx={pt.x} cy={pt.y} r={14} fill="transparent" />
@@ -1356,7 +1667,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                                   x={pt.x}
                                   y={H - 10}
                                   textAnchor="middle"
-                                  className="fill-slate-500 dark:fill-slate-400 text-[10px] font-mono"
+                                  className="fill-slate-500 dark:fill-slate-300 text-[10px] font-mono"
                                 >
                                   {pt.date.slice(5)}
                                 </text>
@@ -1379,36 +1690,40 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
   if (isBoardMode) {
     return (
       <div
-        className="fixed inset-0 z-50 bg-slate-50 dark:bg-slate-950 overflow-y-auto"
+        className="fixed inset-0 z-50 dark bg-slate-950 text-slate-100 overflow-y-auto"
         role="dialog"
         aria-modal="true"
         aria-label="Board Presentation Mode"
       >
-        <div className="mx-auto max-w-7xl px-6 py-6 space-y-6">
-          {/* Executive Board Masthead */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
-            <div className="space-y-1 min-w-0">
-              <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                <Presentation className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0" />
-                <span className="font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+        <div className="mx-auto w-full max-w-[1600px] px-5 sm:px-10 py-7 space-y-6">
+          {/* High-Contrast Dark-Mode Executive Board Masthead */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+            <div className="space-y-1.5 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                <Presentation className="h-4 w-4 text-sky-400 shrink-0" />
+                <span className="font-semibold uppercase tracking-wider text-sky-400">
                   Executive Board Presentation
                 </span>
                 <span aria-hidden="true">·</span>
-                <span className="font-mono tabular-nums">{executiveKpis.timestampUtc}</span>
+                <span className="font-medium text-slate-300">Rafi Digital Studio</span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums text-slate-400">
+                  {executiveKpis.timestampUtc}
+                </span>
               </div>
-              <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100 truncate">
+              <h2 className="text-2xl font-bold tracking-tight text-white truncate">
                 {job.fileName}
               </h2>
             </div>
 
-            <div className="flex items-center gap-3 shrink-0">
-              <span className="hidden md:inline font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+            <div className="flex flex-wrap items-center gap-3 shrink-0">
+              <span className="hidden lg:inline font-mono text-xs text-slate-400 tabular-nums">
                 SHA-256: {executiveKpis.fileHashPreview}
               </span>
               <button
                 type="button"
                 onClick={() => setIsBoardMode(false)}
-                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3.5 text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3.5 text-xs font-semibold text-slate-100 hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
               >
                 <Minimize2 className="h-3.5 w-3.5 shrink-0" />
                 <span>Exit Presentation (Esc)</span>
@@ -1416,43 +1731,72 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
             </div>
           </div>
 
-          {/* Enlarged Executive KPI Cards */}
+          {/* Enlarged High-Contrast Executive KPI Cards */}
           {executiveKpiStrip}
 
-          {/* Full-Width Interactive Chart Panel */}
+          {/* Full-Width High-Contrast Dark Interactive Chart Panel */}
           {chartPanel}
 
-          {/* Bottom Pre-Audit Variance & Attestation Strip */}
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-5 py-3.5 text-xs text-slate-600 dark:text-slate-300">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono tabular-nums">
-              <span>
-                Input Sum:{' '}
-                <strong className="text-slate-900 dark:text-slate-100">
-                  {formatExecutiveCurrency(executiveKpis.inputSum)}
-                </strong>
-              </span>
-              <span className="text-slate-400" aria-hidden="true">
-                ·
-              </span>
-              <span>
-                Reconciled Output:{' '}
-                <strong className="text-slate-900 dark:text-slate-100">
-                  {formatExecutiveCurrency(executiveKpis.outputSum)}
-                </strong>
-              </span>
-              <span className="text-slate-400" aria-hidden="true">
-                ·
-              </span>
-              <span>
-                Variance:{' '}
-                <strong className="text-blue-600 dark:text-blue-400">
-                  {executiveKpis.reconciledVariance >= 0 ? '+' : ''}
-                  {formatExecutiveCurrency(executiveKpis.reconciledVariance)}
-                </strong>
-              </span>
-            </div>
-            <span className="text-slate-500 dark:text-slate-400">
-              Pre-Audit Reconciliation Certificate · DocuCleanse Enterprise
+          {/* Bottom Pre-Audit Variance & Zero-Retention Attestation Strip */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/95 px-5 py-4 text-xs text-slate-300">
+            {executiveKpis.hasFinancialColumn ? (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono tabular-nums">
+                <span>
+                  Input Sum:{' '}
+                  <strong className="text-white">
+                    {formatExecutiveCurrency(executiveKpis.inputSum, executiveKpis.currencies)}
+                  </strong>
+                </span>
+                <span className="text-slate-600" aria-hidden="true">
+                  ·
+                </span>
+                <span>
+                  Reconciled Output:{' '}
+                  <strong className="text-white">
+                    {formatExecutiveCurrency(executiveKpis.outputSum, executiveKpis.currencies)}
+                  </strong>
+                </span>
+                <span className="text-slate-600" aria-hidden="true">
+                  ·
+                </span>
+                <span>
+                  Variance:{' '}
+                  <strong className="text-sky-400">
+                    {executiveKpis.reconciledVariance >= 0 ? '+' : ''}
+                    {formatExecutiveCurrency(
+                      executiveKpis.reconciledVariance,
+                      executiveKpis.currencies
+                    )}
+                  </strong>
+                </span>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono tabular-nums">
+                <span>
+                  Records Verified:{' '}
+                  <strong className="text-white">
+                    {executiveKpis.rowsCleaned}/{executiveKpis.rowsIngested}
+                  </strong>
+                </span>
+                <span className="text-slate-600" aria-hidden="true">
+                  ·
+                </span>
+                <span>
+                  Unique Entities:{' '}
+                  <strong className="text-white">
+                    {executiveKpis.uniqueEntitiesCount.toLocaleString('en-US')}
+                  </strong>
+                </span>
+                <span className="text-slate-600" aria-hidden="true">
+                  ·
+                </span>
+                <span className="text-slate-400">
+                  Non-Financial Dataset · Categorical Analytics
+                </span>
+              </div>
+            )}
+            <span className="text-slate-400">
+              Ephemeral RAM Processing · Pre-Audit Ready · Rafi Digital Studio
             </span>
           </div>
         </div>

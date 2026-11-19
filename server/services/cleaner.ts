@@ -493,10 +493,10 @@ function normalizeCurrencyOrNumberDeterministic(
   if (!s) return { value: '' };
   if (FORMULA_TOKEN_REGEX.test(s)) return { value: `[ERROR: ${stripFormulaLeadingEquals(s)}]` };
 
+  const detectedCode = isCurrency ? detectCurrencyCode(s) : null;
   const isAccountingNeg = /^\(.*\)$/.test(s);
   let cleaned = s
-    .replace(/\b(CA|AU|US|NZ|HK|SG)\$/gi, '')
-    .replace(/(?:^|[\s(])(C|A)\$/gi, '')
+    .replace(/([-(\s]|^)(?:CA|AU|US|NZ|HK|SG|C|A)\$/gi, '$1')
     .replace(/[$€£¥₹₩₽]/g, '')
     .replace(/\b(USD|EUR|GBP|CAD|AUD|NZD|JPY|INR|PKR|AED|SAR|CHF|RS\.?)\b/gi, '')
     .replace(/[()\s]/g, '');
@@ -529,7 +529,7 @@ function normalizeCurrencyOrNumberDeterministic(
 
   const signed = isAccountingNeg ? -Math.abs(num) : num;
   if (isCurrency) {
-    return { value: signed.toFixed(2) };
+    return { value: formatCurrencyPreservingSymbol(signed, detectedCode) };
   }
   return { value: Number.isInteger(signed) ? String(signed) : String(Number(signed.toFixed(4))) };
 }
@@ -617,29 +617,61 @@ function detectCurrencyCode(rawVal: string | undefined): string | null {
   if (/\bCAD\b|CA\$|(?:^|[\s(-])C\$/i.test(s)) return 'CAD';
   if (/\bAUD\b|AU\$|(?:^|[\s(-])A\$/i.test(s)) return 'AUD';
   if (/\bNZD\b|NZ\$/i.test(s)) return 'NZD';
+  if (/\bSGD\b|SG\$|(?:^|[\s(-])S\$/i.test(s)) return 'SGD';
+  if (/\bHKD\b|HK\$/i.test(s)) return 'HKD';
   if (/£|\bGBP\b/i.test(s)) return 'GBP';
   if (/€|\bEUR\b/i.test(s)) return 'EUR';
-  if (/\bUSD\b|US\$|\$/i.test(s)) return 'USD';
   if (/¥|\bJPY\b/i.test(s)) return 'JPY';
-  if (/\bCHF\b/i.test(s)) return 'CHF';
   if (/₹|\bINR\b/i.test(s)) return 'INR';
+  if (/\bCHF\b/i.test(s)) return 'CHF';
   if (/\bPKR\b|\bRs\.?\b/i.test(s)) return 'PKR';
   if (/\bAED\b/i.test(s)) return 'AED';
   if (/\bSAR\b/i.test(s)) return 'SAR';
+  if (/\bUSD\b|US\$|\$/i.test(s)) return 'USD';
   return null;
+}
+
+function currencyCodeToPrefix(code: string | null): string {
+  if (!code) return '';
+  switch (code.toUpperCase()) {
+    case 'EUR':
+      return '€';
+    case 'GBP':
+      return '£';
+    case 'USD':
+      return '$';
+    case 'JPY':
+      return '¥';
+    case 'INR':
+      return '₹';
+    default:
+      return code.toUpperCase();
+  }
+}
+
+function formatCurrencyPreservingSymbol(num: number, currencyCode: string | null): string {
+  const sign = num < 0 ? '-' : '';
+  const absFormatted = Math.abs(num).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  const prefix = currencyCodeToPrefix(currencyCode);
+  if (!prefix) {
+    return `${sign}${absFormatted}`;
+  }
+  return `${sign}${prefix} ${absFormatted}`;
 }
 
 function parseNumericValue(val: string | undefined): number | null {
   if (val === undefined || val === null) return null;
   const s = String(val).trim();
-  if (!s || FORMULA_TOKEN_REGEX.test(s) || /^\[ERROR:/i.test(s)) return null;
+  if (!s || s.startsWith('=') || FORMULA_TOKEN_REGEX.test(s) || /^\[ERROR:/i.test(s)) return null;
 
   const isAccountingNeg = /^\(.*\)$/.test(s);
   let cleaned = s
-    .replace(/\b(CA|AU|US|NZ|HK|SG)\$/gi, '')
-    .replace(/(?:^|[\s(])(C|A)\$/gi, '')
+    .replace(/([-(\s]|^)(?:CA|AU|US|NZ|HK|SG|C|A|S)\$/gi, '$1')
     .replace(/[$€£¥₹₩₽%]/g, '')
-    .replace(/\b(USD|EUR|GBP|CAD|AUD|NZD|JPY|INR|PKR|AED|SAR|CHF|RS\.?)\b/gi, '')
+    .replace(/\b(USD|EUR|GBP|CAD|AUD|NZD|SGD|HKD|JPY|INR|PKR|AED|SAR|CHF|RS\.?)\b/gi, '')
     .replace(/[()\s]/g, '');
 
   const hasComma = cleaned.includes(',');
@@ -807,15 +839,41 @@ function reconcileTabularRowsAndAudit(params: {
     }
   });
 
-  // Pre-scan currencies across primary monetary column (and currency column if present)
+  const currencyColIndices = new Set<number>();
+  schemaMappings.forEach((m, idx) => {
+    const combined = `${m.rawHeader} ${m.normalizedHeader}`.toLowerCase();
+    const isRate = /tax[\s_-]?rate|\brate\b|_rate|pct|percent/.test(combined);
+    if (
+      !isRate &&
+      (m.detectedType === 'currency' ||
+        idx === unitPriceColIdx ||
+        idx === primaryAmountIdx ||
+        /\b(price|cost|amount|total|revenue|mrr|balance|fee|spend|budget)\b/i.test(combined))
+    ) {
+      currencyColIndices.add(idx);
+    }
+  });
+
+  // Pre-scan currencies across primary monetary column, unit_price, currency column, and header hints (NEVER default to USD)
   const currencyCounts = new Map<string, number>();
+  const scanCurrencyIndices = Array.from(
+    new Set([primaryAmountIdx, unitPriceColIdx, existingCurrencyIdx].filter((i) => i >= 0))
+  );
+  for (const idx of scanCurrencyIndices) {
+    const headerHint = detectCurrencyCode(schemaMappings[idx].rawHeader);
+    if (headerHint) {
+      currencyCounts.set(headerHint, (currencyCounts.get(headerHint) ?? 0) + 1);
+    }
+  }
   if (primaryAmountIdx >= 0) {
     const rawAmtHeader = schemaMappings[primaryAmountIdx].rawHeader;
+    const rawUnitHeader = unitPriceColIdx >= 0 ? schemaMappings[unitPriceColIdx].rawHeader : null;
     const rawCurrHeader =
       existingCurrencyIdx >= 0 ? schemaMappings[existingCurrencyIdx].rawHeader : null;
     for (const row of parsed.rows) {
       const code =
         detectCurrencyCode(row[rawAmtHeader]) ||
+        (rawUnitHeader ? detectCurrencyCode(row[rawUnitHeader]) : null) ||
         (rawCurrHeader ? detectCurrencyCode(row[rawCurrHeader]) : null);
       if (code) {
         currencyCounts.set(code, (currencyCounts.get(code) ?? 0) + 1);
@@ -825,7 +883,8 @@ function reconcileTabularRowsAndAudit(params: {
   const detectedCurrencies = Array.from(currencyCounts.entries())
     .sort((a, b) => b[1] - a[1])
     .map(([code]) => code);
-  const dominantCurrency = detectedCurrencies[0] || 'USD';
+  // Preserve null when no currency symbol or ISO code was present in the source file (never force USD)
+  const dominantCurrency: string | null = detectedCurrencies[0] || null;
   const hasExplicitMultiCurrency = detectedCurrencies.length >= 2;
   const shouldEmitLedgerCurrencyColumns = primaryAmountIdx >= 0;
 
@@ -970,11 +1029,18 @@ function reconcileTabularRowsAndAudit(params: {
 
         if (qtyNum !== null && priceNum !== null) {
           const calcNum = qtyNum * priceNum;
-          autoCalculated = calcNum.toFixed(2);
+          const inheritedCur =
+            detectCurrencyCode(rawRow[priceMapping.rawHeader]) ||
+            (existingCurrencyIdx >= 0
+              ? detectCurrencyCode(rawRow[schemaMappings[existingCurrencyIdx].rawHeader])
+              : null) ||
+            detectCurrencyCode(m.rawHeader) ||
+            dominantCurrency;
+          autoCalculated = formatCurrencyPreservingSymbol(calcNum, inheritedCur);
           cleanRow[m.normalizedHeader] = autoCalculated;
           leakageRecoveredValue += Math.abs(calcNum);
           rowLeakageCounted = true;
-          calcExplanation = `Critical spreadsheet formula error (${rawDisplay}) detected in "${m.rawHeader}". Auto-calculated using (${qtyMapping.rawHeader} × ${priceMapping.rawHeader}): ${qtyNum} × ${priceNum.toFixed(2)} = ${autoCalculated}.`;
+          calcExplanation = `Critical spreadsheet formula error (${rawDisplay}) detected in "${m.rawHeader}". Auto-calculated using (${qtyMapping.rawHeader} × ${priceMapping.rawHeader}): ${qtyNum} × ${formatCurrencyPreservingSymbol(priceNum, inheritedCur)} = ${autoCalculated}.`;
         }
       }
 
@@ -993,6 +1059,30 @@ function reconcileTabularRowsAndAudit(params: {
       });
     }
 
+    // 3b. Preserve original currency symbols across ALL monetary columns (unit_price, total_amount, price, cost, etc.)
+    for (const cIdx of currencyColIndices) {
+      const m = schemaMappings[cIdx];
+      const rawVal = String(rawRow[m.rawHeader] ?? '').trim();
+      const curVal = String(cleanRow[m.normalizedHeader] ?? '').trim();
+      if (!curVal || curVal.startsWith('[ERROR:') || curVal === '[MISSING]') continue;
+
+      const parsedVal = parseNumericValue(curVal) ?? parseNumericValue(rawVal);
+      if (parsedVal === null) continue;
+
+      const colCurrency =
+        detectCurrencyCode(rawVal) ||
+        detectCurrencyCode(curVal) ||
+        detectCurrencyCode(m.rawHeader) ||
+        (cIdx === primaryAmountIdx && unitPriceColIdx >= 0
+          ? detectCurrencyCode(rawRow[schemaMappings[unitPriceColIdx].rawHeader])
+          : null) ||
+        (existingCurrencyIdx >= 0
+          ? detectCurrencyCode(rawRow[schemaMappings[existingCurrencyIdx].rawHeader])
+          : null);
+
+      cleanRow[m.normalizedHeader] = formatCurrencyPreservingSymbol(parsedVal, colCurrency);
+    }
+
     // 4. Multi-Currency Ledger Normalization (raw_amount, normalized_amount, currency_code) + Variance & Negative Balance Alerts
     if (shouldEmitLedgerCurrencyColumns && primaryAmountIdx >= 0) {
       const amtMapping = schemaMappings[primaryAmountIdx];
@@ -1002,35 +1092,6 @@ function reconcileTabularRowsAndAudit(params: {
       const rawNum = parseNumericValue(rawAmtStr);
       let cleanNum = parseNumericValue(cleanAmtStr);
 
-      if (cleanNum === null && rawNum !== null) {
-        cleanNum = rawNum;
-        cleanAmtStr = rawNum.toFixed(2);
-        cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
-      } else if (
-        cleanNum === null &&
-        primaryAmountIdx === totalColIdx &&
-        qtyColIdx >= 0 &&
-        unitPriceColIdx >= 0
-      ) {
-        // Deterministically calculate quantity * unit_price for uncalculated Excel formulas (e.g., =F2*G2) or blank totals
-        const qtyMapping = schemaMappings[qtyColIdx];
-        const priceMapping = schemaMappings[unitPriceColIdx];
-        const qtyNum = parseNumericValue(
-          cleanRow[qtyMapping.normalizedHeader] || rawRow[qtyMapping.rawHeader]
-        );
-        const priceNum = parseNumericValue(
-          cleanRow[priceMapping.normalizedHeader] || rawRow[priceMapping.rawHeader]
-        );
-        if (qtyNum !== null && priceNum !== null) {
-          cleanNum = Number((qtyNum * priceNum).toFixed(2));
-          cleanAmtStr = cleanNum.toFixed(2);
-          cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
-        }
-      } else if (cleanNum !== null) {
-        cleanAmtStr = cleanNum.toFixed(2);
-        cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
-      }
-
       const rowCurrency =
         detectCurrencyCode(rawAmtStr) ||
         (unitPriceColIdx >= 0
@@ -1039,11 +1100,50 @@ function reconcileTabularRowsAndAudit(params: {
         (existingCurrencyIdx >= 0
           ? detectCurrencyCode(rawRow[schemaMappings[existingCurrencyIdx].rawHeader])
           : null) ||
+        detectCurrencyCode(amtMapping.rawHeader) ||
         dominantCurrency;
 
+      if (cleanNum === null && rawNum !== null && rawNum !== 0) {
+        cleanNum = rawNum;
+        cleanAmtStr = formatCurrencyPreservingSymbol(rawNum, rowCurrency);
+        cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
+      }
+
+      if (
+        (cleanNum === null ||
+          (cleanNum === 0 &&
+            (!rawAmtStr || rawAmtStr.startsWith('=') || rawNum === null || rawNum === 0))) &&
+        primaryAmountIdx === totalColIdx &&
+        qtyColIdx >= 0 &&
+        unitPriceColIdx >= 0
+      ) {
+        // Deterministically calculate quantity * unit_price for uncalculated Excel formulas (e.g., =F2*G2), cached zeros, or blank totals
+        const qtyMapping = schemaMappings[qtyColIdx];
+        const priceMapping = schemaMappings[unitPriceColIdx];
+        const qtyNum = parseNumericValue(
+          cleanRow[qtyMapping.normalizedHeader] || rawRow[qtyMapping.rawHeader]
+        );
+        const priceNum = parseNumericValue(
+          cleanRow[priceMapping.normalizedHeader] || rawRow[priceMapping.rawHeader]
+        );
+        if (qtyNum !== null && priceNum !== null && qtyNum * priceNum !== 0) {
+          cleanNum = Number((qtyNum * priceNum).toFixed(2));
+          cleanAmtStr = formatCurrencyPreservingSymbol(cleanNum, rowCurrency);
+          cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
+        }
+      } else if (cleanNum === null && rawNum !== null) {
+        cleanNum = rawNum;
+        cleanAmtStr = formatCurrencyPreservingSymbol(rawNum, rowCurrency);
+        cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
+      } else if (cleanNum !== null) {
+        cleanAmtStr = formatCurrencyPreservingSymbol(cleanNum, rowCurrency);
+        cleanRow[amtMapping.normalizedHeader] = cleanAmtStr;
+      }
+
       cleanRow['raw_amount'] = rawAmtStr;
-      cleanRow['normalized_amount'] = cleanNum !== null ? cleanNum.toFixed(2) : cleanAmtStr;
-      cleanRow['currency_code'] = rowCurrency;
+      cleanRow['normalized_amount'] =
+        cleanNum !== null ? formatCurrencyPreservingSymbol(cleanNum, rowCurrency) : cleanAmtStr;
+      cleanRow['currency_code'] = rowCurrency || 'N/A';
 
       if (rawNum !== null) {
         inputSum += rawNum;
@@ -1070,14 +1170,15 @@ function reconcileTabularRowsAndAudit(params: {
             return !(matchesRow && mentionsNegBal);
           });
 
+          const formattedNeg = formatCurrencyPreservingSymbol(cleanNum, rowCurrency);
           highPriorityFinancialAlerts.push({
             id: `anom_finbal_${rIdx}_${crypto.randomUUID().slice(0, 6)}`,
             severity: 'critical',
             category: 'High-Priority Financial Alert',
             location: `${rowPrefix}, normalized_amount`,
-            rawValue: rawAmtStr || cleanNum.toFixed(2),
-            suggestedOrFixedValue: `${cleanNum.toFixed(2)} ${rowCurrency} (Verify Reversal / Credit)`,
-            explanation: `Negative transaction balance (${cleanNum.toFixed(2)} ${rowCurrency}) detected on ${rowPrefix}. Flagged as High-Priority Financial Alert for pre-audit treasury review.`,
+            rawValue: rawAmtStr || formattedNeg,
+            suggestedOrFixedValue: `${formattedNeg} (Verify Reversal / Credit)`,
+            explanation: `Negative transaction balance (${formattedNeg}) detected on ${rowPrefix}. Flagged as High-Priority Financial Alert for pre-audit treasury review.`,
           });
         }
       }
@@ -1275,12 +1376,7 @@ function reconcileTabularRowsAndAudit(params: {
     outputSum: Number(outputSum.toFixed(2)),
     reconciledVariance: Number((outputSum - inputSum).toFixed(2)),
     primaryAmountColumn: primaryAmountIdx >= 0 ? 'normalized_amount' : null,
-    detectedCurrencies:
-      detectedCurrencies.length > 0
-        ? detectedCurrencies
-        : shouldEmitLedgerCurrencyColumns
-        ? [dominantCurrency]
-        : [],
+    detectedCurrencies,
     leakageRecoveredValue: Number(leakageRecoveredValue.toFixed(2)),
     reconciliationConfidenceScore,
   };
@@ -1587,7 +1683,7 @@ Your job is to inspect raw spreadsheet/CSV rows and return a normalized, audit-r
 Strict normalization rules:
 1. Schema Mapping: Convert messy or inconsistent column headers into clean snake_case canonical headers (e.g., "Txn Dt" -> "transaction_date", "Amt ($)" -> "amount", "Ph #" -> "phone_number"). Keep exact correspondence in schemaMappings.
 2. Dates: Normalize all dates to ISO-8601 format YYYY-MM-DD (e.g., "11/4/26" -> "2026-11-04", "Nov 04, 2026" -> "2026-11-04").
-3. Currency & Amounts: Normalize inconsistent currency strings ("$1,250.00", "USD 1250", "1.250,00 €", "(45.50)") into clean decimal numbers with 2 decimal places (e.g. "1250.00", "-45.50"). If multiple currencies appear, preserve or create a clean currency code or note the currency in the column/anomaly log, and keep numbers strictly formatted as decimal strings like "1250.00".
+3. Currency & Amounts: ALWAYS preserve the original currency symbol or ISO code (€, £, $, ¥, USD, EUR, GBP, CAD, AUD). Format monetary values cleanly with thousands commas, 2 decimal places, and the detected currency symbol attached (e.g. "€ 1,450.50", "£ 2,500.00", "$ 120.00", "¥ 15,000.00", "CAD 450.00", "-$ 45.50"). NEVER strip currency symbols down to a plain float and NEVER default non-USD or symbol-less values to USD $.
 4. Phone Numbers: Normalize messy phone numbers ("(415) 555-0192", "415.555.0192", "1 415 555 0192") into consistent "+1-415-555-0192" (or E.164 if international). Flag invalid/incomplete numbers as warnings.
 5. Whitespace & Casing: Trim stray spaces, normalize vendor/client name casing to clean Title Case where appropriate, normalize status values ("paid", "PAID", "Settled" -> "Paid").
 6. Formula Errors & Negative Quantities: Detect all spreadsheet formula errors (=#REF!, =#DIV/0!, =#VALUE!, #REF!, #DIV/0!, #VALUE!, #NAME?, #N/A) and log each as a "critical" anomaly with category "Formula Error". When a formula error occurs in a total/amount column and numeric quantity and unit_price columns exist on the same row, auto-calculate the repaired value as (quantity * unit_price) formatted to 2 decimal places. For any negative quantity (e.g., -2), preserve the numeric value and log a "warning" anomaly with category "Negative Quantity".
@@ -1756,7 +1852,7 @@ export async function cleanMultimodalDocument(params: {
   const { parsed } = params;
 
   const systemInstruction = `You are a receipt, invoice, and financial document extraction & normalization engine for DocuCleanse.
-Extract all tabular line items or transaction records from the attached image or PDF into both rawRows (exact transcribed strings as seen on the receipt/document) and cleanedRows (strictly normalized ISO-8601 dates YYYY-MM-DD, decimal amounts like "124.50", clean vendor names, normalized currency codes).
+Extract all tabular line items or transaction records from the attached image or PDF into both rawRows (exact transcribed strings as seen on the receipt/document) and cleanedRows (strictly normalized ISO-8601 dates YYYY-MM-DD, cleanly formatted amounts that RETAIN their original currency symbol or code such as "€ 1,450.50", "£ 2,500.00", "$ 124.50", "¥ 15,000.00" — never stripping symbols or defaulting to USD $, clean vendor names, normalized currency codes).
 If the receipt shows subtotal, tax, tip, or total discrepancies, or illegible/blurry fields, log them in anomalies with severity "critical" or "warning". Log normalized dates/currencies as "fixed".`;
 
   const response = await callWithRetry((modelName, useLowThinking) =>

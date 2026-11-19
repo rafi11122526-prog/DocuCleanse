@@ -6,19 +6,44 @@ import {
   CheckCircle2,
   Copy,
   FileCheck2,
+  FileSignature,
   ShieldCheck,
 } from 'lucide-react';
 import type { AnomalySeverity, CleanJob } from '../types';
 
 interface AnomalyCardsProps {
   job: CleanJob;
+  onExport?: (jobId: string, format: 'csv' | 'xlsx' | 'pdf' | 'certificate') => void;
+  exportingFormat?: string | null;
 }
 
-function formatMoneyAmount(value: number): string {
-  return value.toLocaleString('en-US', {
+function currencyCodeToPrefix(code: string): string {
+  switch (code.toUpperCase()) {
+    case 'EUR':
+      return '€';
+    case 'GBP':
+      return '£';
+    case 'USD':
+      return '$';
+    case 'JPY':
+      return '¥';
+    case 'INR':
+      return '₹';
+    default:
+      return code.toUpperCase();
+  }
+}
+
+function formatMoneyAmount(value: number, currencies: string[] = []): string {
+  const sign = value < 0 ? '-' : '';
+  const formatted = Math.abs(value).toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+  if (currencies.length === 1) {
+    return `${sign}${currencyCodeToPrefix(currencies[0])} ${formatted}`;
+  }
+  return `${sign}${formatted}`;
 }
 
 function formatDisplayUtc(value: string): string {
@@ -28,7 +53,7 @@ function formatDisplayUtc(value: string): string {
   return `${dt.toISOString().replace('T', ' ').slice(0, 19)} UTC`;
 }
 
-export function AnomalyCards({ job }: AnomalyCardsProps) {
+export function AnomalyCards({ job, onExport, exportingFormat }: AnomalyCardsProps) {
   const [severityFilter, setSeverityFilter] = useState<'all' | AnomalySeverity>('all');
   const [copiedHash, setCopiedHash] = useState(false);
 
@@ -121,12 +146,24 @@ export function AnomalyCards({ job }: AnomalyCardsProps) {
       inputSum: Number(inSum.toFixed(2)),
       outputSum: Number(outSum.toFixed(2)),
       reconciledVariance: Number((outSum - inSum).toFixed(2)),
-      primaryAmountColumn: totalCol,
+      primaryAmountColumn: totalCol || null,
       detectedCurrencies: [] as string[],
       leakageRecoveredValue: 0,
       reconciliationConfidenceScore: 99.0,
     };
   }, [job]);
+
+  const hasFinancialData = useMemo(() => {
+    if (complianceMeta.primaryAmountColumn) return true;
+    const hasCurrencyMapping = job.schemaMappings.some((m) => m.detectedType === 'currency');
+    if (hasCurrencyMapping) return true;
+    return job.cleanedHeaders.some(
+      (h) =>
+        /(normalized_amount|total[\s_-]?amount|line[\s_-]?total|\bamount\b|\bprice\b|revenue|mrr|balance|cost)/i.test(
+          h
+        ) && !/tax[\s_-]?rate|\brate\b|pct|percent/i.test(h)
+    );
+  }, [complianceMeta.primaryAmountColumn, job.schemaMappings, job.cleanedHeaders]);
 
   const hasValidHash = /^[a-f0-9]{64}$/i.test(complianceMeta.fileHashSha256);
 
@@ -212,25 +249,43 @@ export function AnomalyCards({ job }: AnomalyCardsProps) {
             </span>
           </div>
 
-          <div className="flex items-center gap-2 text-xs">
-            <FileCheck2
-              className={`h-3.5 w-3.5 shrink-0 ${
-                complianceMeta.rowChecksumMatch
-                  ? 'text-emerald-600 dark:text-emerald-400'
-                  : 'text-amber-600 dark:text-amber-400'
-              }`}
-            />
-            <span
-              className={`font-medium ${
-                complianceMeta.rowChecksumMatch
-                  ? 'text-emerald-700 dark:text-emerald-400'
-                  : 'text-amber-700 dark:text-amber-400'
-              }`}
-            >
-              {complianceMeta.rowChecksumMatch
-                ? 'Row Checksum Verified'
-                : 'Row Count Variance Flagged'}
-            </span>
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            <div className="flex items-center gap-1.5">
+              <FileCheck2
+                className={`h-3.5 w-3.5 shrink-0 ${
+                  complianceMeta.rowChecksumMatch
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-amber-600 dark:text-amber-400'
+                }`}
+              />
+              <span
+                className={`font-medium ${
+                  complianceMeta.rowChecksumMatch
+                    ? 'text-emerald-700 dark:text-emerald-400'
+                    : 'text-amber-700 dark:text-amber-400'
+                }`}
+              >
+                {complianceMeta.rowChecksumMatch
+                  ? 'Row Checksum Verified'
+                  : 'Row Count Variance Flagged'}
+              </span>
+            </div>
+
+            {onExport && (
+              <button
+                type="button"
+                disabled={exportingFormat !== null && exportingFormat !== undefined}
+                onClick={() => onExport(job.id, 'certificate')}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0 disabled:opacity-60"
+              >
+                <FileSignature className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {exportingFormat === 'certificate'
+                    ? 'Signing Certificate PDF...'
+                    : 'Download Formal Pre-Audit Attestation Certificate'}
+                </span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -303,27 +358,47 @@ export function AnomalyCards({ job }: AnomalyCardsProps) {
             </div>
           </div>
 
-          {/* Reconciled Variance Tracker */}
+          {/* Reconciled Variance Tracker (Financial) OR Dataset Schema Profile (Non-Financial) */}
           <div className="px-5 py-3.5 space-y-1 min-w-0">
-            <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-              Reconciled Variance Tracker
-            </div>
-            <div className="font-mono text-xs font-medium text-slate-900 dark:text-slate-100 tabular-nums">
-              {formatMoneyAmount(complianceMeta.inputSum)} → {formatMoneyAmount(complianceMeta.outputSum)}
-            </div>
-            <div
-              className={`font-mono text-[11px] tabular-nums ${
-                Math.abs(complianceMeta.reconciledVariance) > 0.005
-                  ? 'text-blue-600 dark:text-blue-400 font-medium'
-                  : 'text-emerald-600 dark:text-emerald-400'
-              }`}
-            >
-              Net delta: {complianceMeta.reconciledVariance >= 0 ? '+' : ''}
-              {formatMoneyAmount(complianceMeta.reconciledVariance)}
-              {complianceMeta.primaryAmountColumn
-                ? ` (${complianceMeta.primaryAmountColumn})`
-                : ''}
-            </div>
+            {hasFinancialData ? (
+              <>
+                <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                  Reconciled Variance Tracker
+                </div>
+                <div className="font-mono text-xs font-medium text-slate-900 dark:text-slate-100 tabular-nums">
+                  {formatMoneyAmount(complianceMeta.inputSum, complianceMeta.detectedCurrencies)} →{' '}
+                  {formatMoneyAmount(complianceMeta.outputSum, complianceMeta.detectedCurrencies)}
+                </div>
+                <div
+                  className={`font-mono text-[11px] tabular-nums ${
+                    Math.abs(complianceMeta.reconciledVariance) > 0.005
+                      ? 'text-blue-600 dark:text-blue-400 font-medium'
+                      : 'text-emerald-600 dark:text-emerald-400'
+                  }`}
+                >
+                  Net delta: {complianceMeta.reconciledVariance >= 0 ? '+' : ''}
+                  {formatMoneyAmount(
+                    complianceMeta.reconciledVariance,
+                    complianceMeta.detectedCurrencies
+                  )}
+                  {complianceMeta.primaryAmountColumn
+                    ? ` (${complianceMeta.primaryAmountColumn})`
+                    : ''}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                  Dataset Schema Profile
+                </div>
+                <div className="font-mono text-xs font-medium text-slate-900 dark:text-slate-100 tabular-nums">
+                  {job.cleanedHeaders.length} Columns · Non-Financial
+                </div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Categorical &amp; operational fields only
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>

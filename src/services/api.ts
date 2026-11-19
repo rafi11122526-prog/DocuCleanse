@@ -407,14 +407,43 @@ function normalizeDateLocal(val: string): string {
   return s;
 }
 
-function normalizeCurrencyLocal(val: string): string {
+function currencyCodeToPrefixLocal(code: string | null): string {
+  if (!code) return '';
+  switch (code.toUpperCase()) {
+    case 'EUR':
+      return '€';
+    case 'GBP':
+      return '£';
+    case 'USD':
+      return '$';
+    case 'JPY':
+      return '¥';
+    case 'INR':
+      return '₹';
+    default:
+      return code.toUpperCase();
+  }
+}
+
+function formatCurrencyWithSymbolLocal(num: number, code: string | null): string {
+  const sign = num < 0 ? '-' : '';
+  const absFormatted = Math.abs(num).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  const prefix = currencyCodeToPrefixLocal(code);
+  return prefix ? `${sign}${prefix} ${absFormatted}` : `${sign}${absFormatted}`;
+}
+
+function normalizeCurrencyLocal(val: string, fallbackCode: string | null = null): string {
   const s = val.trim();
   if (FORMULA_ERROR_REGEX_LOCAL.test(s)) {
     return `[ERROR: ${s.replace(/^=/, '').toUpperCase()}]`;
   }
   const num = parseNumericLocal(s);
   if (num === null) return s;
-  return num.toFixed(2);
+  const detected = detectCurrencyCodeLocal(s) || fallbackCode;
+  return formatCurrencyWithSymbolLocal(num, detected);
 }
 
 function normalizePhoneLocal(val: string): string {
@@ -567,10 +596,13 @@ async function runFallbackClean(file: File): Promise<{ job: CleanJob; quota: Quo
 
           if (cIdx === totalColIdx && qtyColIdx >= 0 && unitPriceColIdx >= 0) {
             const qtyNum = parseNumericLocal(rawObj[rawHeaders[qtyColIdx]]);
-            const priceNum = parseNumericLocal(rawObj[rawHeaders[unitPriceColIdx]]);
+            const priceRaw = rawObj[rawHeaders[unitPriceColIdx]];
+            const priceNum = parseNumericLocal(priceRaw);
             if (qtyNum !== null && priceNum !== null) {
               const calcNum = Number((qtyNum * priceNum).toFixed(2));
-              autoCalc = calcNum.toFixed(2);
+              const inheritedCur =
+                detectCurrencyCodeLocal(priceRaw) || detectCurrencyCodeLocal(rawH);
+              autoCalc = formatCurrencyWithSymbolLocal(calcNum, inheritedCur);
               cleanVal = autoCalc;
               leakageRecoveredValue += Math.abs(calcNum);
               anomalies.push({
@@ -580,7 +612,7 @@ async function runFallbackClean(file: File): Promise<{ job: CleanJob; quota: Quo
                 location: `${rowPrefix}, ${normH}`,
                 rawValue: rawVal,
                 suggestedOrFixedValue: autoCalc,
-                explanation: `Critical spreadsheet formula error (${rawVal}) detected in "${rawH}". Auto-calculated using (${rawHeaders[qtyColIdx]} × ${rawHeaders[unitPriceColIdx]}): ${qtyNum} × ${priceNum.toFixed(2)} = ${autoCalc}.`,
+                explanation: `Critical spreadsheet formula error (${rawVal}) detected in "${rawH}". Auto-calculated using (${rawHeaders[qtyColIdx]} × ${rawHeaders[unitPriceColIdx]}): ${qtyNum} × ${formatCurrencyWithSymbolLocal(priceNum, inheritedCur)} = ${autoCalc}.`,
               });
             }
           }
@@ -600,7 +632,7 @@ async function runFallbackClean(file: File): Promise<{ job: CleanJob; quota: Quo
         } else if (mapping.detectedType === 'date' && cleanVal) {
           cleanVal = normalizeDateLocal(cleanVal);
         } else if (mapping.detectedType === 'currency' && cleanVal) {
-          cleanVal = normalizeCurrencyLocal(cleanVal);
+          cleanVal = normalizeCurrencyLocal(cleanVal, detectCurrencyCodeLocal(rawH));
         } else if (mapping.detectedType === 'phone' && cleanVal) {
           const formatted = normalizePhoneLocal(cleanVal);
           if (formatted === cleanVal && cleanVal.replace(/\D/g, '').length < 10) {
@@ -659,53 +691,60 @@ async function runFallbackClean(file: File): Promise<{ job: CleanJob; quota: Quo
         }
       });
 
-      // Multi-currency banking normalization on primary monetary column
+      // Multi-currency banking normalization on primary monetary column (preserve symbol, never default to USD)
       if (hasCurrencyCol) {
         const rawAmtHeader = rawHeaders[primaryAmtIdx];
         const normAmtHeader = schemaMappings[primaryAmtIdx].normalizedHeader;
         const rawAmtStr = String(rawObj[rawAmtHeader] ?? '').trim();
         const cleanedAmtStr = String(cleanObj[normAmtHeader] ?? '').trim();
 
+        const detectedCur =
+          detectCurrencyCodeLocal(rawAmtStr) ||
+          (unitPriceColIdx >= 0
+            ? detectCurrencyCodeLocal(rawObj[rawHeaders[unitPriceColIdx]])
+            : null) ||
+          detectCurrencyCodeLocal(rawAmtHeader);
+
         const rawNum = parseNumericLocal(rawAmtStr);
         let cleanNum = parseNumericLocal(cleanedAmtStr);
         if (
-          cleanNum === null &&
+          (cleanNum === null ||
+            (cleanNum === 0 &&
+              (!rawAmtStr || rawAmtStr.startsWith('=') || rawNum === null || rawNum === 0))) &&
           primaryAmtIdx === totalColIdx &&
           qtyColIdx >= 0 &&
           unitPriceColIdx >= 0
         ) {
           const qtyNum = parseNumericLocal(rawObj[rawHeaders[qtyColIdx]]);
           const priceNum = parseNumericLocal(rawObj[rawHeaders[unitPriceColIdx]]);
-          if (qtyNum !== null && priceNum !== null) {
+          if (qtyNum !== null && priceNum !== null && qtyNum * priceNum !== 0) {
             cleanNum = Number((qtyNum * priceNum).toFixed(2));
-            cleanObj[normAmtHeader] = cleanNum.toFixed(2);
+            cleanObj[normAmtHeader] = formatCurrencyWithSymbolLocal(cleanNum, detectedCur);
           }
         }
         if (rawNum !== null) inputSum += rawNum;
         if (cleanNum !== null) outputSum += cleanNum;
 
-        const detectedCur =
-          detectCurrencyCodeLocal(rawAmtStr) ||
-          (unitPriceColIdx >= 0
-            ? detectCurrencyCodeLocal(rawObj[rawHeaders[unitPriceColIdx]])
-            : null) ||
-          'USD';
-        detectedCurrenciesSet.add(detectedCur);
+        if (detectedCur) {
+          detectedCurrenciesSet.add(detectedCur);
+        }
 
-        cleanObj.raw_amount = rawAmtStr || '0.00';
-        cleanObj.normalized_amount = cleanNum !== null ? cleanNum.toFixed(2) : cleanedAmtStr;
-        cleanObj.currency_code = detectedCur;
+        cleanObj.raw_amount = rawAmtStr;
+        cleanObj.normalized_amount =
+          cleanNum !== null ? formatCurrencyWithSymbolLocal(cleanNum, detectedCur) : cleanedAmtStr;
+        cleanObj.currency_code = detectedCur || 'N/A';
 
         if (cleanNum !== null && cleanNum < 0) {
           leakageRecoveredValue += Math.abs(cleanNum);
+          const formattedNeg = formatCurrencyWithSymbolLocal(cleanNum, detectedCur);
           anomalies.push({
             id: `anom_negbal_${rIdx}`,
             severity: 'critical',
             category: 'High-Priority Financial Alert',
             location: `${rowPrefix}, normalized_amount`,
             rawValue: rawAmtStr || cleanedAmtStr,
-            suggestedOrFixedValue: `${cleanNum.toFixed(2)} ${detectedCur} (Audit Required)`,
-            explanation: `Negative transaction balance (${cleanNum.toFixed(2)} ${detectedCur}) flagged on ${rowPrefix}. Verify credit memo, chargeback, or sign reversal.`,
+            suggestedOrFixedValue: `${formattedNeg} (Audit Required)`,
+            explanation: `Negative transaction balance (${formattedNeg}) flagged on ${rowPrefix}. Verify credit memo, chargeback, or sign reversal.`,
           });
         }
       }
@@ -1028,7 +1067,7 @@ export async function cleanUploadedFile(
 
 export async function downloadExportFile(
   job: CleanJob,
-  format: 'csv' | 'xlsx' | 'pdf'
+  format: 'csv' | 'xlsx' | 'pdf' | 'certificate'
 ): Promise<{ blob: Blob; fileName: string }> {
   try {
     const res = await fetch(`/api/export/${job.id}/${format}`, {
@@ -1061,7 +1100,11 @@ export async function downloadExportFile(
     const blob = await res.blob();
     const disposition = res.headers.get('Content-Disposition') || '';
     const match = disposition.match(/filename="([^"]+)"/);
-    const fileName = match?.[1] || `docucleanse_export.${format}`;
+    const fileName =
+      match?.[1] ||
+      (format === 'certificate'
+        ? `docucleanse_pre_audit_attestation_certificate.pdf`
+        : `docucleanse_export.${format}`);
     return { blob, fileName };
   } catch (err) {
     if (!shouldUseMockFallback(err)) {

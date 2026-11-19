@@ -174,6 +174,51 @@ async function startServer() {
     res.json({ job });
   });
 
+  // Formal Pre-Audit Attestation Certificate PDF (always downloadable for compliance verification)
+  app.get('/api/export/:jobId/certificate', async (req, res) => {
+    try {
+      const userId = resolveUserId(req);
+      getOrCreateUser(userId);
+      const job = getJobById(String(req.params.jobId));
+      if (!job) {
+        res.status(404).json({ error: 'Clean job not found.' });
+        return;
+      }
+
+      const baseName = path
+        .basename(job.fileName, path.extname(job.fileName))
+        .replace(/[^a-zA-Z0-9_-]/g, '_');
+
+      if (job.auditMetadata) {
+        res.setHeader('X-DocuCleanse-SHA256', job.auditMetadata.fileHashSha256);
+        res.setHeader('X-DocuCleanse-Timestamp-UTC', job.auditMetadata.timestampUtc);
+        res.setHeader(
+          'X-DocuCleanse-Row-Checksum',
+          `${job.auditMetadata.rowsIngested}/${job.auditMetadata.rowsCleaned}:${job.auditMetadata.rowChecksumMatch ? 'VERIFIED' : 'MISMATCH'}`
+        );
+      }
+
+      const buffer = await generateSummaryPdfBuffer(job);
+      logExportAction({
+        userId,
+        jobId: job.id,
+        fileName: job.fileName,
+        fileType: job.fileType,
+        rowCount: job.rowCount,
+        action: 'export_pdf',
+      });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${baseName}_pre_audit_attestation_certificate.pdf"`
+      );
+      res.send(buffer);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Attestation certificate export failed.';
+      res.status(500).json({ error: message });
+    }
+  });
+
   // Export endpoint guarded by requireProExport for XLSX & PDF formats
   app.get('/api/export/:jobId/:format', requireProExport, async (req: GuardedRequest, res) => {
     try {
