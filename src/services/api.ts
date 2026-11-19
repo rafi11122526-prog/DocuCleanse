@@ -449,15 +449,28 @@ function normalizeCurrencyLocal(val: string, fallbackCode: string | null = null)
 function normalizePhoneLocal(val: string): string {
   const digits = val.replace(/\D/g, '');
   if (digits.length === 10) {
-    return `+1-${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+    return `+1 (${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
   }
   if (digits.length === 11 && digits.startsWith('1')) {
-    return `+1-${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7)}`;
+    return `+1 (${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
   }
   if (digits.length >= 11 && digits.length <= 15) {
     return `+${digits}`;
   }
   return val.trim();
+}
+
+function formatPhoneSpreadsheetTextLocal(raw: string): string {
+  const cleaned = raw.replace(/^['=]+/, '').trim();
+  if (!cleaned || cleaned === '[MISSING]' || /^\[ERROR/i.test(cleaned)) return cleaned;
+  const naMatch = cleaned.match(/^(?:\+?1[\s.-]?)?\(?(\d{3})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})$/);
+  if (naMatch) {
+    return `+1 (${naMatch[1]}) ${naMatch[2]}-${naMatch[3]}`;
+  }
+  if (/^\+\d[\d\s()-]*-[\d\s()-]+$/.test(cleaned)) {
+    return cleaned.replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  return cleaned;
 }
 
 async function runFallbackClean(file: File): Promise<{ job: CleanJob; quota: QuotaSnapshot }> {
@@ -1182,20 +1195,27 @@ export async function downloadExportFile(
           const m = mappingByHeader.get(h);
           const lower = h.toLowerCase();
 
-          if (
+          const isPhoneField =
             m?.detectedType === 'phone' ||
-            /(phone|tel|mobile|contact_phone)/i.test(lower) ||
+            /(phone|tel|mobile|contact_phone)/i.test(lower);
+
+          if (isPhoneField) {
+            wsData[addr] = { t: 's', v: String(formatPhoneSpreadsheetTextLocal(rawStr)), z: '@' };
+            return;
+          }
+
+          if (
             lower === 'raw_amount' ||
             lower === 'currency_code' ||
             m?.detectedType === 'date' ||
             m?.detectedType === 'email' ||
             m?.detectedType === 'status' ||
-            /\b(txn_id|id|code)\b/i.test(lower) ||
+            /\b(transaction_id|txn_id|id|code|region_code)\b/i.test(lower) ||
             rawStr === '' ||
             rawStr.startsWith('[ERROR') ||
             rawStr === '[MISSING]'
           ) {
-            wsData[addr] = { t: 's', v: rawStr, z: '@' };
+            wsData[addr] = { t: 's', v: String(rawStr), z: '@' };
             return;
           }
 
@@ -1211,7 +1231,7 @@ export async function downloadExportFile(
             const cleanedPct = rawStr.endsWith('%') ? Number(rawStr.slice(0, -1)) / 100 : Number(rawStr);
             if (Number.isFinite(cleanedPct)) {
               const frac = Math.abs(cleanedPct) > 1 ? cleanedPct / 100 : cleanedPct;
-              wsData[addr] = { t: 'n', v: frac, z: '0%' };
+              wsData[addr] = { t: 'n', v: frac, z: '0.0%' };
               return;
             }
           }
@@ -1237,9 +1257,31 @@ export async function downloadExportFile(
         });
       });
 
-      wsData['!ref'] = XLSX.utils.encode_range({
+      const refRange = XLSX.utils.encode_range({
         s: { r: 0, c: 0 },
         e: { r: job.cleanedRows.length, c: Math.max(0, headers.length - 1) },
+      });
+      wsData['!ref'] = refRange;
+      wsData['!autofilter'] = {
+        ref: XLSX.utils.encode_range({
+          s: { r: 0, c: 0 },
+          e: { r: 0, c: Math.max(0, headers.length - 1) },
+        }),
+      };
+      wsData['!cols'] = headers.map((h) => {
+        const lower = h.toLowerCase();
+        const wch = /(client_name|customer_name|vendor_name|email)/.test(lower)
+          ? 26
+          : /(product_item|product|item|description)/.test(lower)
+          ? 24
+          : /(phone|tel|mobile|contact_phone)/.test(lower)
+          ? 20
+          : /\b(qty|quantity|units|tax_rate)\b/.test(lower)
+          ? 12
+          : /(status|currency_code)/.test(lower)
+          ? 14
+          : 16;
+        return { wch: Math.max(wch, h.length + 5) };
       });
       XLSX.utils.book_append_sheet(wb, wsData, 'Cleaned_Data');
 

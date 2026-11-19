@@ -15,6 +15,84 @@ function sanitizeMojibake(val: string): string {
     .replace(/Â\s/g, ' ');
 }
 
+/**
+ * Formats phone numbers strictly as non-formula literal display text so Excel / Google Sheets
+ * never evaluates leading `+` and hyphenated segments (e.g. `+1-555-234-5678` -> `-6466`).
+ */
+function formatPhoneForSpreadsheetText(raw: string): string {
+  const cleaned = sanitizeMojibake(raw).replace(/^['=]+/, '').trim();
+  if (!cleaned || cleaned === '[MISSING]' || /^\[ERROR/i.test(cleaned)) {
+    return cleaned;
+  }
+  // North American 10 or 11-digit phone (+1-555-234-5678 / 555-234-5678 / 5552345678) -> "+1 (555) 234-5678"
+  const naMatch = cleaned.match(/^(?:\+?1[\s.-]?)?\(?(\d{3})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})$/);
+  if (naMatch) {
+    return `+1 (${naMatch[1]}) ${naMatch[2]}-${naMatch[3]}`;
+  }
+  // International phone starting with "+" and hyphens (e.g. "+44-20-7946-0958") -> replace hyphens with spaces
+  if (/^\+\d[\d\s()-]*-[\d\s()-]+$/.test(cleaned)) {
+    return cleaned.replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  return cleaned;
+}
+
+function resolveColumnLayout(
+  header: string,
+  detectedType?: string
+): { minWidth: number; alignment: 'left' | 'center' | 'right' } {
+  const lower = header.trim().toLowerCase();
+
+  if (/\b(transaction_id|txn_id|order_id|invoice_id|record_id|id)\b/.test(lower)) {
+    return { minWidth: 16, alignment: 'center' };
+  }
+  if (detectedType === 'date' || /\bdate\b|_date|^dt$/.test(lower)) {
+    return { minWidth: 16, alignment: 'center' };
+  }
+  if (/(client_name|customer_name|vendor_name|account_name|company_name|\bclient\b|\bcustomer\b|\bvendor\b)/.test(lower)) {
+    return { minWidth: 26, alignment: 'left' };
+  }
+  if (/(region_code|\bregion\b|country_code|\bcountry\b|\bstate\b|territory)/.test(lower)) {
+    return { minWidth: 16, alignment: 'center' };
+  }
+  if (/(product_item|\bproduct\b|\bitem\b|line_item|description|service|category)/.test(lower)) {
+    return { minWidth: 24, alignment: 'left' };
+  }
+  if (/\b(qty|quantity|units)\b|qty_sold|quantity_sold|units_sold/.test(lower)) {
+    return { minWidth: 12, alignment: 'right' };
+  }
+  if (/\b(unit[\s_-]?price|unit[\s_-]?cost|price)\b/.test(lower) && !/total|tax|discount|rate/.test(lower)) {
+    return { minWidth: 16, alignment: 'right' };
+  }
+  if (/tax[\s_-]?rate|tax[\s_-]?pct|tax[\s_-]?percent|tax[\s_-]?%|\btax\b.*\brate\b|rate[\s_-]?pct/.test(lower)) {
+    return { minWidth: 12, alignment: 'right' };
+  }
+  if (lower === 'raw_amount') {
+    return { minWidth: 16, alignment: 'right' };
+  }
+  if (
+    lower === 'normalized_amount' ||
+    /\b(total[\s_-]?amount|line[\s_-]?total|net[\s_-]?total|total|amount|revenue|mrr|balance)\b/.test(lower)
+  ) {
+    return { minWidth: 16, alignment: 'right' };
+  }
+  if (detectedType === 'status' || /\bstatus\b/.test(lower)) {
+    return { minWidth: 14, alignment: 'center' };
+  }
+  if (detectedType === 'phone' || /(phone|tel|mobile|whatsapp|contact_phone|contact_num)/.test(lower)) {
+    return { minWidth: 20, alignment: 'center' };
+  }
+  if (lower === 'currency_code' || lower === 'currency') {
+    return { minWidth: 14, alignment: 'center' };
+  }
+  if (detectedType === 'email' || /email/.test(lower)) {
+    return { minWidth: 26, alignment: 'left' };
+  }
+  if (detectedType === 'currency' || detectedType === 'number') {
+    return { minWidth: 16, alignment: 'right' };
+  }
+  return { minWidth: 16, alignment: 'left' };
+}
+
 function parseNumericStrict(raw: unknown): number | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
@@ -406,10 +484,18 @@ function computeSynchronizedMetrics(job: CleanJobRecord): SynchronizedExportMetr
  * starting directly on Row 1 with column headers (no `# ...` comment lines corrupting columns).
  */
 export function generateCsvBuffer(job: CleanJobRecord): Buffer {
+  const phoneHeaders = new Set(
+    job.schemaMappings
+      .filter((m) => m.detectedType === 'phone' || /(phone|tel|mobile|contact_phone)/i.test(m.normalizedHeader))
+      .map((m) => m.normalizedHeader)
+  );
   const rowsAsMatrix: string[][] = [job.cleanedHeaders];
   for (const row of job.cleanedRows) {
     rowsAsMatrix.push(
-      job.cleanedHeaders.map((h) => sanitizeMojibake(String(row[h] ?? '')))
+      job.cleanedHeaders.map((h) => {
+        const val = sanitizeMojibake(String(row[h] ?? ''));
+        return phoneHeaders.has(h) ? formatPhoneForSpreadsheetText(val) : val;
+      })
     );
   }
   const csvString = `\uFEFF${stringifyCsv(rowsAsMatrix)}`;
@@ -482,21 +568,32 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
     fgColor: { argb: 'FF0F172A' },
   };
   const headerFont: Partial<ExcelJS.Font> = {
-    name: 'Calibri',
+    name: 'Segoe UI',
     size: 11,
     bold: true,
     color: { argb: 'FFFFFFFF' },
   };
   const bodyFont: Partial<ExcelJS.Font> = {
-    name: 'Calibri',
-    size: 10.5,
+    name: 'Segoe UI',
+    size: 10,
     color: { argb: 'FF0F172A' },
+  };
+  const headerBorder: Partial<ExcelJS.Borders> = {
+    bottom: { style: 'medium', color: { argb: 'FF1E293B' } },
+  };
+  const dataRowBorder: Partial<ExcelJS.Borders> = {
+    bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
   };
   const thinBorder: Partial<ExcelJS.Borders> = {
     top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
     bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
     left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
     right: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+  };
+  const whiteFill: ExcelJS.Fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFFFFF' },
   };
   const zebraFill: ExcelJS.Fill = {
     type: 'pattern',
@@ -511,24 +608,25 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
     views: [{ state: 'frozen', ySplit: 1 }],
   });
 
-  // Row 1: Bold stylized headers
+  // Row 1: Deep corporate navy (#0F172A), bold white 11pt Segoe UI, 28pt height, centered
   const headerRow = wsData.addRow(headers);
-  headerRow.height = 26;
+  headerRow.height = 28;
   headerRow.eachCell((cell) => {
     cell.fill = headerFill;
     cell.font = headerFont;
-    cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
-    cell.border = thinBorder;
+    cell.alignment = { vertical: 'middle', horizontal: 'center' };
+    cell.border = headerBorder;
   });
 
-  const colMaxWidths = headers.map((h) => Math.max(14, h.length + 5));
+  const colLayouts = headers.map((h) => resolveColumnLayout(h, mappingByHeader.get(h)?.detectedType));
+  const colMaxWidths = headers.map((h, idx) => Math.max(colLayouts[idx].minWidth, h.length + 5));
 
-  // Data Rows (Row 2..N+1)
+  // Data Rows (Row 2..N+1): 20pt height, alternating white/#F8FAFC zebra striping, subtle #E2E8F0 bottom border
   job.cleanedRows.forEach((row, rIdx) => {
     const excelRowNum = rIdx + 2;
     const rawRow = job.rawRows[rIdx] || {};
     const excelRow = wsData.getRow(excelRowNum);
-    excelRow.height = 21;
+    excelRow.height = 20;
 
     const explicitCur = String(row.currency_code ?? '').trim().toUpperCase();
     const rowCurrency =
@@ -544,17 +642,14 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
       const cell = excelRow.getCell(cIdx + 1);
       const rawStr = sanitizeMojibake(String(row[h] ?? '')).trim();
       const mapping = mappingByHeader.get(h);
+      const layout = colLayouts[cIdx];
       const lower = h.toLowerCase();
 
       cell.font = bodyFont;
-      cell.border = thinBorder;
-      if (rIdx % 2 === 1) {
-        cell.fill = zebraFill;
-      }
+      cell.border = dataRowBorder;
+      cell.fill = rIdx % 2 === 1 ? zebraFill : whiteFill;
 
-      colMaxWidths[cIdx] = Math.min(40, Math.max(colMaxWidths[cIdx], rawStr.length + 4));
-
-      // 1. Phone numbers, IDs, codes, raw_amount, dates, emails, statuses -> STRICT TEXT ('@')
+      // 1. Phone numbers -> STRICT non-formula String/Text ('@') so Excel NEVER evaluates "+1-555-234-5678" as -6466
       const looksLikePhoneValue =
         cIdx !== qtyColIdx &&
         cIdx !== unitPriceColIdx &&
@@ -566,14 +661,27 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
         mapping?.detectedType === 'phone' ||
         /(phone|tel|mobile|whatsapp|contact_phone|contact_num)/i.test(lower) ||
         looksLikePhoneValue;
+
+      if (isPhoneCol) {
+        const safePhoneStr = formatPhoneForSpreadsheetText(rawStr);
+        // Explicitly set JS string value (ExcelJS.ValueType.String) and '@' text format — never a formula
+        cell.value = String(safePhoneStr);
+        cell.numFmt = '@';
+        cell.alignment = { vertical: 'middle', horizontal: layout.alignment };
+        colMaxWidths[cIdx] = Math.min(46, Math.max(colMaxWidths[cIdx], safePhoneStr.length + 5));
+        return;
+      }
+
+      colMaxWidths[cIdx] = Math.min(46, Math.max(colMaxWidths[cIdx], rawStr.length + 4));
+
+      // 2. IDs, codes, raw_amount, dates, emails, statuses -> STRICT TEXT ('@')
       const isStrictTextCol =
-        isPhoneCol ||
         lower === 'raw_amount' ||
         lower === 'currency_code' ||
         mapping?.detectedType === 'email' ||
         mapping?.detectedType === 'date' ||
         mapping?.detectedType === 'status' ||
-        /\b(txn_id|order_id|invoice_id|id|code|zip|postal)\b/i.test(lower) ||
+        /\b(transaction_id|txn_id|order_id|invoice_id|id|code|zip|postal|region_code)\b/i.test(lower) ||
         rawStr === '' ||
         rawStr.startsWith('[ERROR') ||
         rawStr === '[MISSING]';
@@ -581,11 +689,11 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
       if (isStrictTextCol) {
         cell.value = String(rawStr);
         cell.numFmt = '@';
-        cell.alignment = { vertical: 'middle', horizontal: 'left' };
+        cell.alignment = { vertical: 'middle', horizontal: layout.alignment };
         return;
       }
 
-      // 2. Quantity column (e.g., Column F: qty_sold) -> STRICT numeric integer, NEVER currency
+      // 3. Quantity column (e.g., Column F: quantity / qty_sold) -> STRICT numeric integer (#,##0), right-aligned
       if (cIdx === qtyColIdx) {
         const qtyVal = parseNumericStrict(rawStr);
         if (qtyVal !== null) {
@@ -596,19 +704,18 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
         }
       }
 
-      // 3. Tax Rate / Percentage column (e.g., Column H: tax_rate) -> numeric percentage float formatted as %
+      // 4. Tax Rate / Percentage column (e.g., Column H: tax_rate) -> numeric percentage float (0.0%), right-aligned
       if (cIdx === taxRateColIdx || rawStr.endsWith('%')) {
         const pct = parseTaxRateFraction(rawStr);
         if (pct !== null) {
           cell.value = pct;
-          const pctTimes100 = Number((pct * 100).toFixed(4));
-          cell.numFmt = Number.isInteger(pctTimes100) ? '0%' : '0.00%';
+          cell.numFmt = '0.0%';
           cell.alignment = { vertical: 'middle', horizontal: 'right' };
           return;
         }
       }
 
-      // 4. Unit Price column (e.g., Column G: unit_price) -> numeric currency float with native Excel currency format
+      // 5. Unit Price column (e.g., Column G: unit_price) -> numeric currency float with native Excel currency format
       if (cIdx === unitPriceColIdx) {
         const priceVal = parseNumericStrict(rawStr);
         if (priceVal !== null) {
@@ -616,11 +723,12 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
           cell.value = priceVal;
           cell.numFmt = excelNumberFormatForCurrency(priceCur);
           cell.alignment = { vertical: 'middle', horizontal: 'right' };
+          colMaxWidths[cIdx] = Math.min(46, Math.max(colMaxWidths[cIdx], priceVal.toFixed(2).length + 7));
           return;
         }
       }
 
-      // 5. Total Amount column (e.g., Column I: total_amount) -> calculated formula (qty_sold * unit_price) with currency format
+      // 6. Total Amount column (e.g., Column I: total_amount) -> calculated formula (qty * unit_price) with currency format
       if (cIdx === totalColIdx) {
         let totalVal = parseNumericStrict(rawStr);
         const totalCur = detectCurrencyCode(rawStr) || rowCurrency;
@@ -642,6 +750,7 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
             };
             cell.numFmt = numFmt;
             cell.alignment = { vertical: 'middle', horizontal: 'right' };
+            colMaxWidths[cIdx] = Math.min(46, Math.max(colMaxWidths[cIdx], totalVal.toFixed(2).length + 7));
             return;
           }
         }
@@ -650,11 +759,12 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
           cell.value = totalVal;
           cell.numFmt = numFmt;
           cell.alignment = { vertical: 'middle', horizontal: 'right' };
+          colMaxWidths[cIdx] = Math.min(46, Math.max(colMaxWidths[cIdx], totalVal.toFixed(2).length + 7));
           return;
         }
       }
 
-      // 6. normalized_amount -> live reference to total_amount (or numeric currency float)
+      // 7. normalized_amount -> live reference to total_amount (or numeric currency float)
       if (cIdx === normalizedAmtColIdx) {
         const normVal = parseNumericStrict(rawStr);
         const normCur = detectCurrencyCode(rawStr) || rowCurrency;
@@ -669,17 +779,19 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
               };
               cell.numFmt = numFmt;
               cell.alignment = { vertical: 'middle', horizontal: 'right' };
+              colMaxWidths[cIdx] = Math.min(46, Math.max(colMaxWidths[cIdx], normVal.toFixed(2).length + 7));
               return;
             }
           }
           cell.value = normVal;
           cell.numFmt = numFmt;
           cell.alignment = { vertical: 'middle', horizontal: 'right' };
+          colMaxWidths[cIdx] = Math.min(46, Math.max(colMaxWidths[cIdx], normVal.toFixed(2).length + 7));
           return;
         }
       }
 
-      // 7. Any other numeric or currency column
+      // 8. Any other numeric or currency column
       const genericNum = parseNumericStrict(rawStr);
       const detectedCellCur = detectCurrencyCode(rawStr);
       if (
@@ -700,8 +812,8 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
       }
 
       // Default: clean UTF-8 string
-      cell.value = rawStr;
-      cell.alignment = { vertical: 'middle', horizontal: 'left' };
+      cell.value = String(rawStr);
+      cell.alignment = { vertical: 'middle', horizontal: layout.alignment };
     });
   });
 
@@ -712,7 +824,7 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
     };
   }
   headers.forEach((_, idx) => {
-    wsData.getColumn(idx + 1).width = Math.max(14, colMaxWidths[idx]);
+    wsData.getColumn(idx + 1).width = Math.max(colLayouts[idx].minWidth, colMaxWidths[idx]);
   });
 
   // ============================================================================
@@ -726,15 +838,15 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
   const titleCell = wsCert.getCell('A1');
   titleCell.value = 'DocuCleanse — Pre-Audit Processing Report & Audit Metadata';
   titleCell.fill = headerFill;
-  titleCell.font = { name: 'Calibri', size: 13, bold: true, color: { argb: 'FFFFFFFF' } };
+  titleCell.font = { name: 'Segoe UI', size: 12.5, bold: true, color: { argb: 'FFFFFFFF' } };
   titleCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
   wsCert.getRow(1).height = 30;
 
   const certSubHeader = wsCert.addRow(['Compliance / Reconciliation Field', 'Verified Value']);
-  certSubHeader.height = 24;
+  certSubHeader.height = 26;
   certSubHeader.eachCell((cell) => {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
-    cell.font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.font = { name: 'Segoe UI', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
     cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
     cell.border = thinBorder;
   });
@@ -849,13 +961,13 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
 
   certEntries.forEach((entry, idx) => {
     const r = wsCert.addRow([entry.label, entry.value]);
-    r.height = 21;
+    r.height = 20;
     const c1 = r.getCell(1);
     const c2 = r.getCell(2);
     c1.font = { ...bodyFont, bold: true, color: { argb: 'FF334155' } };
     c2.font = { ...bodyFont, bold: Boolean(entry.bold) };
-    c1.border = thinBorder;
-    c2.border = thinBorder;
+    c1.border = dataRowBorder;
+    c2.border = dataRowBorder;
     c1.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
     c2.alignment = {
       vertical: 'middle',
@@ -864,10 +976,9 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
     if (entry.numFmt) {
       c2.numFmt = entry.numFmt;
     }
-    if (idx % 2 === 1) {
-      c1.fill = zebraFill;
-      c2.fill = zebraFill;
-    }
+    const rowFill = idx % 2 === 1 ? zebraFill : whiteFill;
+    c1.fill = rowFill;
+    c2.fill = rowFill;
   });
 
   // Isolated Multi-Currency Breakdown Table on Tab 2 with live SUMIFS
@@ -877,10 +988,10 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
       'Isolated Multi-Currency Gross Inflow Subtotals (No Cross-FX Mixing)',
       'Positive Subtotal',
     ]);
-    sectionRow.height = 24;
+    sectionRow.height = 26;
     sectionRow.eachCell((cell) => {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
-      cell.font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.font = { name: 'Segoe UI', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
       cell.border = thinBorder;
       cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
     });
@@ -897,20 +1008,19 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
         : entry.total;
 
       const r = wsCert.addRow([entry.code, valuePayload]);
-      r.height = 21;
+      r.height = 20;
       const c1 = r.getCell(1);
       const c2 = r.getCell(2);
       c1.font = { ...bodyFont, bold: true };
       c2.font = { ...bodyFont, bold: true };
-      c1.border = thinBorder;
-      c2.border = thinBorder;
+      c1.border = dataRowBorder;
+      c2.border = dataRowBorder;
       c1.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
       c2.alignment = { vertical: 'middle', horizontal: 'right' };
       c2.numFmt = excelNumberFormatForCurrency(entry.code);
-      if (idx % 2 === 1) {
-        c1.fill = zebraFill;
-        c2.fill = zebraFill;
-      }
+      const rowFill = idx % 2 === 1 ? zebraFill : whiteFill;
+      c1.fill = rowFill;
+      c2.fill = rowFill;
     });
   }
 
@@ -925,12 +1035,12 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
   });
   const anomHeaders = ['Severity', 'Category', 'Location', 'Raw Value', 'Normalized / Suggested', 'Explanation'];
   const anomHeadRow = wsAnom.addRow(anomHeaders);
-  anomHeadRow.height = 26;
+  anomHeadRow.height = 28;
   anomHeadRow.eachCell((cell) => {
     cell.fill = headerFill;
     cell.font = headerFont;
-    cell.border = thinBorder;
-    cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+    cell.border = headerBorder;
+    cell.alignment = { vertical: 'middle', horizontal: 'center' };
   });
 
   job.anomalies.forEach((a, idx) => {
@@ -945,9 +1055,14 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
     r.height = 22;
     r.eachCell((cell, colNum) => {
       cell.font = bodyFont;
-      cell.border = thinBorder;
+      cell.border = dataRowBorder;
       cell.numFmt = '@';
-      cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: colNum === 6 };
+      cell.fill = idx % 2 === 1 ? zebraFill : whiteFill;
+      cell.alignment = {
+        vertical: 'middle',
+        horizontal: colNum === 1 ? 'center' : 'left',
+        wrapText: colNum === 6,
+      };
       if (colNum === 1) {
         cell.font = {
           ...bodyFont,
@@ -961,12 +1076,14 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
                 : 'FF15803D',
           },
         };
-      } else if (idx % 2 === 1) {
-        cell.fill = zebraFill;
       }
     });
   });
 
+  wsAnom.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: anomHeaders.length },
+  };
   wsAnom.getColumn(1).width = 14;
   wsAnom.getColumn(2).width = 28;
   wsAnom.getColumn(3).width = 30;
@@ -981,22 +1098,22 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
     views: [{ state: 'frozen', ySplit: 1 }],
   });
   const mapHeadRow = wsMap.addRow(['Raw Header', 'Normalized Header', 'Detected Type', 'Mapping Rationale']);
-  mapHeadRow.height = 26;
+  mapHeadRow.height = 28;
   mapHeadRow.eachCell((cell) => {
     cell.fill = headerFill;
     cell.font = headerFont;
-    cell.border = thinBorder;
-    cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+    cell.border = headerBorder;
+    cell.alignment = { vertical: 'middle', horizontal: 'center' };
   });
 
   job.schemaMappings.forEach((m, idx) => {
     const r = wsMap.addRow([m.rawHeader, m.normalizedHeader, m.detectedType, m.reason]);
-    r.height = 21;
-    r.eachCell((cell) => {
+    r.height = 20;
+    r.eachCell((cell, colNum) => {
       cell.font = bodyFont;
-      cell.border = thinBorder;
-      cell.alignment = { vertical: 'middle', horizontal: 'left' };
-      if (idx % 2 === 1) cell.fill = zebraFill;
+      cell.border = dataRowBorder;
+      cell.fill = idx % 2 === 1 ? zebraFill : whiteFill;
+      cell.alignment = { vertical: 'middle', horizontal: colNum === 3 ? 'center' : 'left' };
     });
   });
 
