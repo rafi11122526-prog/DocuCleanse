@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import express from 'express';
@@ -68,9 +69,15 @@ async function startServer() {
     next();
   });
 
-  // Health endpoint
+  // Health endpoint with ephemeral RAM lifecycle attestation
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'docucleanse-api', timestamp: new Date().toISOString() });
+    res.json({
+      ok: true,
+      service: 'docucleanse-api',
+      storageMode: 'ephemeral_ram_memoryStorage',
+      rawFileDiskRetention: 'zero',
+      timestamp: new Date().toISOString(),
+    });
   });
 
   // Current user quota & usage logs
@@ -91,10 +98,11 @@ async function startServer() {
     checkCleanQuota,
     upload.single('file'),
     async (req: GuardedRequest, res) => {
+      const uploadedFile = req.file as (Express.Multer.File & { path?: string }) | undefined;
       try {
         const userId = req.docuUserId!;
         const quota = req.quotaSnapshot!;
-        const file = req.file;
+        const file = uploadedFile;
 
         if (!file) {
           res.status(400).json({ error: 'No file provided. Upload a CSV, XLSX, PDF, or receipt image.' });
@@ -153,6 +161,22 @@ async function startServer() {
             ? 400
             : 500;
         res.status(status).json({ error: message });
+      } finally {
+        // Ephemeral RAM Lifecycle Guard: deterministically zeroize raw file bytes from memory
+        // and defensively unlink any temp path if a stream fallback were ever configured.
+        if (uploadedFile?.buffer && Buffer.isBuffer(uploadedFile.buffer)) {
+          uploadedFile.buffer.fill(0);
+        }
+        if (uploadedFile?.path) {
+          try {
+            await fs.promises.rm(uploadedFile.path, { force: true });
+          } catch {
+            // Ignore already-removed temp paths
+          }
+        }
+        if (req.file) {
+          req.file.buffer = Buffer.alloc(0);
+        }
       }
     }
   );
@@ -264,7 +288,7 @@ async function startServer() {
       }
 
       if (format === 'xlsx') {
-        const buffer = generateXlsxBuffer(job);
+        const buffer = await generateXlsxBuffer(job);
         logExportAction({
           userId: req.docuUserId!,
           jobId: job.id,

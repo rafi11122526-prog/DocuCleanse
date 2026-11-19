@@ -146,9 +146,9 @@ function formatCurrencyWithCode(val: number, code: string): string {
   };
   const sym = symMap[upper];
   if (sym) {
-    return `${sign}${sym}${absFormatted} ${upper}`;
+    return `${upper} ${sign}${sym}${absFormatted}`;
   }
-  return `${sign}${absFormatted} ${upper}`;
+  return `${upper} ${sign}${absFormatted}`;
 }
 
 function formatMetricValue(
@@ -586,19 +586,35 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     const roundedGross = Number(grossInflow.toFixed(2));
     const netVarianceInflow = Number((roundedGross - effectiveLeakageOrRefunds).toFixed(2));
 
-    const totalCells = Math.max(1, job.cleanedRows.length * Math.max(1, job.rawHeaders.length));
+    const activeConfidenceHeaders = job.cleanedHeaders.filter((h) => h !== 'raw_amount');
+    const totalCells = Math.max(
+      1,
+      job.cleanedRows.length * Math.max(1, activeConfidenceHeaders.length)
+    );
     const unresolvedCount = job.cleanedRows.reduce(
       (acc, row) =>
         acc +
-        Object.values(row).filter((v) => /^\[ERROR:/i.test(String(v)) || v === '[MISSING]').length,
+        activeConfidenceHeaders.filter((h) => /^\[ERROR:/i.test(String(row[h] ?? '').trim()))
+          .length,
       0
     );
+    const highPriorityFinAlerts = job.anomalies.filter(
+      (a) =>
+        a.severity === 'critical' &&
+        /financial|currency|negative|fx/i.test(`${a.category} ${a.explanation}`)
+    ).length;
+    const criticalPenalty = Math.min(2.5, highPriorityFinAlerts * 0.15);
+    const computedConfidence = Number(
+      Math.max(
+        0,
+        Math.min(100, ((totalCells - unresolvedCount) / totalCells) * 100 - criticalPenalty)
+      ).toFixed(1)
+    );
+    const storedScore = job.auditMetadata?.reconciliationConfidenceScore;
     const confidenceScore =
-      job.auditMetadata?.reconciliationConfidenceScore !== undefined
-        ? job.auditMetadata.reconciliationConfidenceScore
-        : Number(
-            Math.max(85, Math.min(100, ((totalCells - unresolvedCount) / totalCells) * 100)).toFixed(1)
-          );
+      storedScore !== undefined && Math.abs(storedScore - computedConfidence) <= 1.0
+        ? storedScore
+        : computedConfidence;
 
     const criticalFinancialCount = job.anomalies.filter((a) => a.severity === 'critical').length;
     const roundedNet = Number(netTotal.toFixed(2));
@@ -811,6 +827,13 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
     return m === 0 ? 1 : m;
   }, [groupedData]);
 
+  const isMultiCurrency =
+    executiveKpis.currencyBreakdown.length > 1 || executiveKpis.currencies.length > 1;
+  const displayCurrencyCodes =
+    executiveKpis.currencyBreakdown.length > 0
+      ? executiveKpis.currencyBreakdown.map((c) => c.code)
+      : executiveKpis.currencies;
+
   const executiveKpiStrip = executiveKpis.hasFinancialColumn ? (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
       {/* KPI 1: Total Revenue / Gross Inflow */}
@@ -819,9 +842,16 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
           isBoardMode ? 'p-6 dark:border-slate-700/80 dark:bg-slate-900/95' : 'p-4'
         }`}
       >
-        <div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
-          <span>Total Revenue / Gross Inflow</span>
-          <Coins className="h-4 w-4 text-blue-600 dark:text-sky-400 shrink-0" />
+        <div className="flex items-start justify-between gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          <div className="min-w-0">
+            <div>Total Revenue / Gross Inflow</div>
+            {isMultiCurrency && (
+              <div className="mt-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+                Unconverted Multi-Currency Face Value ({displayCurrencyCodes.join(' · ')})
+              </div>
+            )}
+          </div>
+          <Coins className="h-4 w-4 text-blue-600 dark:text-sky-400 shrink-0 mt-0.5" />
         </div>
         <div
           className={`mt-2 font-mono font-semibold tabular-nums text-slate-900 dark:text-white ${
@@ -832,7 +862,7 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 text-xs text-slate-500 dark:text-slate-400 tabular-nums">
           <span>
-            Net Variance / Inflow:{' '}
+            Net Variance / Inflow{isMultiCurrency ? ' (Unconverted)' : ''}:{' '}
             <strong className="font-mono font-semibold text-slate-700 dark:text-slate-200">
               {formatExecutiveCurrency(executiveKpis.netVarianceInflow, executiveKpis.currencies)}
             </strong>
@@ -845,14 +875,19 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
           )}
         </div>
         {executiveKpis.currencyBreakdown.length > 1 && (
-          <div className="mt-2.5 rounded-lg border border-slate-200/80 dark:border-slate-700/80 bg-slate-50 dark:bg-slate-800/80 px-3 py-2">
+          <div className="mt-2.5 rounded-lg border border-slate-200/90 dark:border-slate-700/80 bg-slate-50 dark:bg-slate-800/80 px-3 py-2">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-              Multi-Currency Summary
+              Isolated Currency Subtotals (No Cross-FX Mixing)
             </div>
-            <div className="mt-0.5 font-mono text-[11px] font-medium text-slate-800 dark:text-slate-100 tabular-nums leading-relaxed">
-              {executiveKpis.currencyBreakdown
-                .map((c) => formatCurrencyWithCode(c.total, c.code))
-                .join(' · ')}
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              {executiveKpis.currencyBreakdown.map((c) => (
+                <span
+                  key={c.code}
+                  className="inline-flex items-center rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-800 dark:text-slate-100 tabular-nums"
+                >
+                  {formatCurrencyWithCode(c.total, c.code)}
+                </span>
+              ))}
             </div>
           </div>
         )}
@@ -1133,6 +1168,11 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
                 <span className="font-mono text-slate-800 dark:text-slate-200">
                   {effectiveCategory || 'group'}
                 </span>
+                {isCurrencyMetric && isMultiCurrency && (
+                  <span className="ml-2 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                    · Unconverted Multi-Currency Face Value ({displayCurrencyCodes.join(' · ')})
+                  </span>
+                )}
               </span>
               {hoveredIndex !== null && groupedData[hoveredIndex] && (
                 <span className="font-mono tabular-nums text-slate-900 dark:text-slate-100">
@@ -1741,6 +1781,16 @@ export function DataVisualizer({ job }: DataVisualizerProps) {
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/95 px-5 py-4 text-xs text-slate-300">
             {executiveKpis.hasFinancialColumn ? (
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono tabular-nums">
+                {isMultiCurrency && (
+                  <>
+                    <span className="font-sans text-[11px] font-semibold text-amber-400">
+                      Unconverted Face Value ({displayCurrencyCodes.join(' · ')})
+                    </span>
+                    <span className="text-slate-600" aria-hidden="true">
+                      ·
+                    </span>
+                  </>
+                )}
                 <span>
                   Input Sum:{' '}
                   <strong className="text-white">

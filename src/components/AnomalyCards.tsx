@@ -75,8 +75,40 @@ export function AnomalyCards({ job, onExport, exportingFormat }: AnomalyCardsPro
   }, [job.anomalies, severityFilter]);
 
   const complianceMeta = useMemo(() => {
+    const activeHeaders = job.cleanedHeaders.filter((h) => h !== 'raw_amount');
+    const totalCells = Math.max(1, job.cleanedRows.length * Math.max(1, activeHeaders.length));
+    const unresolvedErrors = job.cleanedRows.reduce(
+      (acc, row) =>
+        acc +
+        activeHeaders.filter((h) => /^\[ERROR:/i.test(String(row[h] ?? '').trim())).length,
+      0
+    );
+    const highPriorityFinAlerts = job.anomalies.filter(
+      (a) =>
+        a.severity === 'critical' &&
+        /financial|currency|negative|fx/i.test(`${a.category} ${a.explanation}`)
+    ).length;
+    const computedConfidence = Number(
+      Math.max(
+        0,
+        Math.min(
+          100,
+          ((totalCells - unresolvedErrors) / totalCells) * 100 -
+            Math.min(2.5, highPriorityFinAlerts * 0.15)
+        )
+      ).toFixed(1)
+    );
+
     if (job.auditMetadata) {
-      return job.auditMetadata;
+      const stored = job.auditMetadata.reconciliationConfidenceScore;
+      const syncedScore =
+        stored !== undefined && Math.abs(stored - computedConfidence) <= 1.0
+          ? stored
+          : computedConfidence;
+      return {
+        ...job.auditMetadata,
+        reconciliationConfidenceScore: syncedScore,
+      };
     }
     const parseNum = (val: string | undefined): number | null => {
       if (!val) return null;
@@ -364,6 +396,11 @@ export function AnomalyCards({ job, onExport, exportingFormat }: AnomalyCardsPro
               <>
                 <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
                   Reconciled Variance Tracker
+                  {complianceMeta.detectedCurrencies.length > 1 && (
+                    <span className="ml-1 text-amber-700 dark:text-amber-400 font-semibold">
+                      (Unconverted Face Value)
+                    </span>
+                  )}
                 </div>
                 <div className="font-mono text-xs font-medium text-slate-900 dark:text-slate-100 tabular-nums">
                   {formatMoneyAmount(complianceMeta.inputSum, complianceMeta.detectedCurrencies)} →{' '}

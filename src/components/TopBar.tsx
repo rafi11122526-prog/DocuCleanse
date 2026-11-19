@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { Loader2, Menu, Moon, Plus, ShieldCheck, Sun, Upload } from 'lucide-react';
+import { ChevronRight, Loader2, Menu, Moon, Plus, ShieldCheck, Sun, Upload } from 'lucide-react';
 import type { QuotaSnapshot } from '../types';
 import type { ActiveTab } from './Sidebar';
 
@@ -12,6 +12,7 @@ interface TopBarProps {
   onToggleTheme: () => void;
   onNewUpload: () => void;
   onUploadFile?: (file: File) => void;
+  onOpenSecurityBrief: () => void;
   onOpenMobileNav: () => void;
 }
 
@@ -23,6 +24,7 @@ export function TopBar({
   onToggleTheme,
   onNewUpload,
   onUploadFile,
+  onOpenSecurityBrief,
   onOpenMobileNav,
 }: TopBarProps) {
   const quickFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -138,16 +140,32 @@ export function TopBar({
         </div>
       </div>
 
-      {/* Subtle Enterprise Compliance & Zero-Retention Security Strip */}
+      {/* Interactive Enterprise Compliance & Zero-Retention Security Strip */}
       <div className="border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/80 dark:bg-slate-950/60 px-4 sm:px-6 py-1.5">
-        <div className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-400">
-          <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-          <span className="truncate">
-            <span className="font-semibold text-slate-700 dark:text-slate-200">
-              Enterprise Privacy Shield:
-            </span>{' '}
-            Ephemeral RAM Processing · Zero Permanent Data Storage · GDPR &amp; Pre-Audit Ready
-          </span>
+        <div className="flex items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={onOpenSecurityBrief}
+            className="group flex items-center gap-2 text-left text-[11px] text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors min-w-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded"
+            aria-label="Open Security and Architecture Brief"
+          >
+            <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <span className="truncate">
+              <span className="font-semibold text-slate-700 dark:text-slate-200 group-hover:text-blue-600 dark:group-hover:text-sky-400 transition-colors">
+                Enterprise Privacy Shield:
+              </span>{' '}
+              Ephemeral RAM Processing · Zero Permanent Data Storage · GDPR &amp; Pre-Audit Ready
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenSecurityBrief}
+            className="hidden sm:inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-blue-600 dark:text-sky-400 hover:bg-blue-50 dark:hover:bg-sky-950/50 transition-colors whitespace-nowrap shrink-0"
+          >
+            <span>Security &amp; Architecture Brief</span>
+            <ChevronRight className="h-3 w-3 shrink-0" />
+          </button>
         </div>
       </div>
     </header>

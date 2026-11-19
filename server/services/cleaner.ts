@@ -1348,13 +1348,14 @@ function reconcileTabularRowsAndAudit(params: {
     }
   }
 
-  // Compute Reconciliation Confidence Score (0-100%)
-  const totalCells = Math.max(1, parsed.rows.length * finalCleanedHeaders.length);
+  // Compute Reconciliation Confidence Score (0-100%) — synchronized across Dashboard, XLSX, and PDF
+  const activeConfidenceHeaders = finalCleanedHeaders.filter((h) => h !== 'raw_amount');
+  const totalCells = Math.max(1, parsed.rows.length * Math.max(1, activeConfidenceHeaders.length));
   let unresolvedErrorCells = 0;
   for (const row of cleanedRows) {
-    for (const h of finalCleanedHeaders) {
-      const v = String(row[h] ?? '');
-      if (v.startsWith('[ERROR:') || v === '[MISSING]') {
+    for (const h of activeConfidenceHeaders) {
+      const v = String(row[h] ?? '').trim();
+      if (/^\[ERROR:/i.test(v)) {
         unresolvedErrorCells++;
       }
     }

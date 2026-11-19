@@ -15,6 +15,7 @@ import { Footer } from './components/Footer';
 import { HistoryView } from './components/HistoryView';
 import { LegalModal, type LegalDocSection } from './components/LegalModal';
 import { PaywallModal } from './components/PaywallModal';
+import { SecurityArchitectureModal } from './components/SecurityArchitectureModal';
 import { Sidebar, type ActiveTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { UploadDropzone } from './components/UploadDropzone';
@@ -72,6 +73,7 @@ export default function App() {
     open: false,
     section: 'terms',
   });
+  const [securityBriefOpen, setSecurityBriefOpen] = useState(false);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -263,6 +265,7 @@ export default function App() {
             setBanner(null);
           }}
           onUploadFile={handleUploadFile}
+          onOpenSecurityBrief={() => setSecurityBriefOpen(true)}
           onOpenMobileNav={() => setMobileNavOpen(true)}
         />
 
@@ -445,6 +448,12 @@ export default function App() {
         activeSection={legalModal.section}
         onSelectSection={(section) => setLegalModal({ open: true, section })}
         onClose={() => setLegalModal((prev) => ({ ...prev, open: false }))}
+      />
+
+      <SecurityArchitectureModal
+        open={securityBriefOpen}
+        activeJob={activeJob}
+        onClose={() => setSecurityBriefOpen(false)}
       />
     </div>
   );
