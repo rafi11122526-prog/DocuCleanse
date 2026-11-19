@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { Loader2, Menu, Moon, Plus, ShieldCheck, Sparkles, Sun, Upload } from 'lucide-react';
+import { Loader2, Menu, Moon, Plus, ShieldCheck, Sun, Upload } from 'lucide-react';
 import type { QuotaSnapshot } from '../types';
 import type { ActiveTab } from './Sidebar';
 
@@ -134,9 +134,6 @@ export function TopBar({
                 ? 'Clean New File'
                 : 'Clean File'}
             </span>
-            {!isProcessing && (
-              <Sparkles className="relative h-3 w-3 text-sky-200 opacity-85 transition-transform duration-200 group-hover:scale-110 shrink-0" />
-            )}
           </button>
         </div>
       </div>
