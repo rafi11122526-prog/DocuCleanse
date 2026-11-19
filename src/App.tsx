@@ -90,14 +90,6 @@ export default function App() {
       setUsageLogs(qData.usageLogs || []);
       const loadedJobs = jData.jobs || [];
       setJobs(loadedJobs);
-      setActiveJob((current) => {
-        if (current) return current;
-        if (loadedJobs.length > 0) {
-          setShowDropzone(false);
-          return loadedJobs[0];
-        }
-        return null;
-      });
     } catch {
       // Keep UI responsive even if initial poll encounters transient issue
     }
@@ -262,11 +254,15 @@ export default function App() {
           activeFileName={activeJob?.fileName}
           quota={quota}
           theme={theme}
+          isProcessing={isProcessing}
           onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
           onNewUpload={() => {
+            setActiveJob(null);
             setActiveTab('workspace');
             setShowDropzone(true);
+            setBanner(null);
           }}
+          onUploadFile={handleUploadFile}
           onOpenMobileNav={() => setMobileNavOpen(true)}
         />
 

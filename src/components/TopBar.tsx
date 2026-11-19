@@ -1,4 +1,5 @@
-import { Menu, Moon, ShieldCheck, Sun, Upload } from 'lucide-react';
+import { useRef } from 'react';
+import { Loader2, Menu, Moon, Plus, ShieldCheck, Sparkles, Sun, Upload } from 'lucide-react';
 import type { QuotaSnapshot } from '../types';
 import type { ActiveTab } from './Sidebar';
 
@@ -7,8 +8,10 @@ interface TopBarProps {
   activeFileName?: string;
   quota: QuotaSnapshot | null;
   theme: 'light' | 'dark';
+  isProcessing?: boolean;
   onToggleTheme: () => void;
   onNewUpload: () => void;
+  onUploadFile?: (file: File) => void;
   onOpenMobileNav: () => void;
 }
 
@@ -16,16 +19,31 @@ export function TopBar({
   activeTab,
   activeFileName,
   theme,
+  isProcessing = false,
   onToggleTheme,
   onNewUpload,
+  onUploadFile,
   onOpenMobileNav,
 }: TopBarProps) {
+  const quickFileInputRef = useRef<HTMLInputElement | null>(null);
+
   const sectionName =
     activeTab === 'workspace'
       ? 'Workspace'
       : activeTab === 'history'
       ? 'Audit History'
       : 'Plans & Webhooks';
+
+  const isOnCleanUploadScreen = activeTab === 'workspace' && !activeFileName;
+
+  const handleCleanButtonClick = () => {
+    if (isProcessing) return;
+    if (isOnCleanUploadScreen && onUploadFile) {
+      quickFileInputRef.current?.click();
+      return;
+    }
+    onNewUpload();
+  };
 
   return (
     <header className="shrink-0 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
@@ -78,13 +96,47 @@ export function TopBar({
             {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>
 
+          <input
+            ref={quickFileInputRef}
+            type="file"
+            accept=".csv,.xlsx,.xls,.pdf,.png,.jpg,.jpeg,.webp"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file && onUploadFile) {
+                onUploadFile(file);
+              }
+              e.target.value = '';
+            }}
+          />
+
           <button
             type="button"
-            onClick={onNewUpload}
-            className="flex items-center gap-2 rounded-lg bg-slate-900 dark:bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
+            disabled={isProcessing}
+            onClick={handleCleanButtonClick}
+            className="group relative inline-flex h-9 items-center gap-2 overflow-hidden rounded-lg bg-gradient-to-r from-blue-600 via-blue-600 to-indigo-600 px-4 text-xs font-semibold text-white shadow-sm shadow-blue-600/25 ring-1 ring-inset ring-white/20 transition-all duration-200 hover:-translate-y-0.5 hover:from-blue-500 hover:via-blue-600 hover:to-indigo-500 hover:shadow-md hover:shadow-blue-600/35 active:translate-y-0 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-75 whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <Upload className="h-3.5 w-3.5" />
-            <span>Clean File</span>
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/25 to-transparent transition-transform duration-700 ease-out group-hover:translate-x-full"
+            />
+            {isProcessing ? (
+              <Loader2 className="relative h-3.5 w-3.5 animate-spin shrink-0" />
+            ) : activeFileName ? (
+              <Plus className="relative h-3.5 w-3.5 transition-transform duration-200 group-hover:rotate-90 shrink-0" />
+            ) : (
+              <Upload className="relative h-3.5 w-3.5 transition-transform duration-200 group-hover:-translate-y-0.5 shrink-0" />
+            )}
+            <span className="relative">
+              {isProcessing
+                ? 'Cleaning...'
+                : activeFileName
+                ? 'Clean New File'
+                : 'Clean File'}
+            </span>
+            {!isProcessing && (
+              <Sparkles className="relative h-3 w-3 text-sky-200 opacity-85 transition-transform duration-200 group-hover:scale-110 shrink-0" />
+            )}
           </button>
         </div>
       </div>
