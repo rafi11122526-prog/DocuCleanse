@@ -26,9 +26,13 @@ import {
 import {
   ApiBusinessError,
   cleanUploadedFile,
+  clearAllProTokensFromStorage,
+  createDefaultFreeQuota,
   downloadExportFile,
+  enforceVerifiedSubscriptionOnQuota,
   fetchJobs,
   fetchQuotaAndLogs,
+  hasVerifiedPaddleSubscription,
   setDemoQuotaMode,
 } from './services/api';
 import type { CleanJob, PaywallContext, QuotaSnapshot, UsageLog } from './types';
@@ -45,7 +49,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('workspace');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
+  const [quota, setQuota] = useState<QuotaSnapshot>(() => createDefaultFreeQuota());
+  const isPro = quota.plan === 'pro' && hasVerifiedPaddleSubscription();
   const [jobs, setJobs] = useState<CleanJob[]>([]);
   const [usageLogs, setUsageLogs] = useState<UsageLog[]>([]);
   const [activeJob, setActiveJob] = useState<CleanJob | null>(null);
@@ -88,12 +93,13 @@ export default function App() {
   const fetchAccountState = useCallback(async () => {
     try {
       const [qData, jData] = await Promise.all([fetchQuotaAndLogs(), fetchJobs()]);
-      setQuota(qData.quota);
+      setQuota(enforceVerifiedSubscriptionOnQuota(qData.quota));
       setUsageLogs(qData.usageLogs || []);
       const loadedJobs = jData.jobs || [];
       setJobs(loadedJobs);
     } catch {
-      // Keep UI responsive even if initial poll encounters transient issue
+      // Keep UI strictly on Free default if initial poll encounters a transient issue
+      setQuota((prev) => enforceVerifiedSubscriptionOnQuota(prev));
     }
   }, []);
 
@@ -170,8 +176,9 @@ export default function App() {
     }
 
     const freeExhausted =
-      !quota?.canExportProFormats &&
-      (quota?.freeCleansUsedThisMonth ?? 0) >= (quota?.freeCleansLimit ?? 3);
+      !isPro &&
+      !quota.canExportProFormats &&
+      quota.freeCleansUsedThisMonth >= quota.freeCleansLimit;
 
     if (format === 'csv' && freeExhausted) {
       setPaywall({
@@ -223,14 +230,16 @@ export default function App() {
 
   const handleDemoQuotaMode = async (mode: 'reset_free' | 'exhaust_free') => {
     try {
+      clearAllProTokensFromStorage();
       const data = await setDemoQuotaMode(mode);
-      setQuota(data.quota);
+      const normalized = enforceVerifiedSubscriptionOnQuota(data.quota);
+      setQuota(normalized);
       setBanner({
         type: 'success',
         message:
           mode === 'exhaust_free'
             ? 'Simulated 3/3 Free monthly cleans exhausted. Try uploading or exporting to test the Paywall Guardrail.'
-            : 'Account reset to fresh Free tier (0/3 cleans used).',
+            : 'Account reset to Free tier (3 of 3 cleans remaining · Max 50 rows/file). All Pro tokens cleared.',
       });
       await fetchAccountState();
     } catch {

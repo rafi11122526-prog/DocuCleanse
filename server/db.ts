@@ -510,7 +510,13 @@ export function resetAccountToFreeForTesting(userId: string): QuotaSnapshot {
     getOrCreateUser(userId);
     const now = new Date().toISOString();
     db.prepare(
-      `UPDATE users SET plan = 'free', token_balance = 0, updated_at = ? WHERE id = ?`
+      `UPDATE users
+       SET plan = 'free',
+           token_balance = 0,
+           stripe_customer_id = NULL,
+           lemonsqueezy_customer_id = NULL,
+           updated_at = ?
+       WHERE id = ?`
     ).run(now, userId);
     db.prepare(`DELETE FROM usage_logs WHERE user_id = ?`).run(userId);
   });

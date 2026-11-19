@@ -12,6 +12,7 @@ import {
   getUserQuotaSnapshot,
   getUserUsageLogs,
   logExportAction,
+  resetAccountToFreeForTesting,
   saveCleanJob,
 } from './server/db.ts';
 import {
@@ -59,7 +60,7 @@ async function startServer() {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, x-user-id, stripe-signature, paddle-signature'
+      'Content-Type, Authorization, x-user-id, x-paddle-subscription-token, stripe-signature, paddle-signature'
     );
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Type');
     if (req.method === 'OPTIONS') {
@@ -80,11 +81,16 @@ async function startServer() {
     });
   });
 
-  // Current user quota & usage logs
+  // Current user quota & usage logs (strictly Free tier unless a verified active Paddle token is supplied)
   app.get('/api/quota', (req, res) => {
     const userId = resolveUserId(req);
     getOrCreateUser(userId);
-    const quota = getUserQuotaSnapshot(userId);
+    const paddleToken = (req.header('x-paddle-subscription-token') || '').trim();
+    const hasVerifiedToken = /^(sub_|txn_)[a-zA-Z0-9_-]{8,}$/.test(paddleToken);
+    let quota = getUserQuotaSnapshot(userId);
+    if (quota.plan === 'pro' && !hasVerifiedToken) {
+      quota = resetAccountToFreeForTesting(userId);
+    }
     const usageLogs = getUserUsageLogs(userId, 30);
     res.json({ quota, usageLogs });
   });

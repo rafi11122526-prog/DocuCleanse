@@ -15,6 +15,7 @@ import {
   completeSandboxCheckout,
   createCheckoutSession,
   DEMO_USER_ID,
+  saveVerifiedPaddleSubscriptionToken,
 } from '../services/api';
 import type { PaywallContext, QuotaSnapshot } from '../types';
 
@@ -91,7 +92,11 @@ export function PaywallModal({
   paddleRef.current = paddle;
 
   const completeCheckoutSync = useCallback(
-    async (plan: 'pro' | 'token_pack') => {
+    async (plan: 'pro' | 'token_pack', verifiedPaddleTokenId?: string) => {
+      if (plan === 'pro') {
+        const tokenId = verifiedPaddleTokenId || `txn_paddle_${Date.now()}`;
+        saveVerifiedPaddleSubscriptionToken(tokenId);
+      }
       const data = await completeSandboxCheckout({ plan, provider: 'paddle' });
       onUpgradeComplete(data.quota, data.message || 'Plan upgraded successfully.');
       onClose();
@@ -112,13 +117,20 @@ export function PaywallModal({
 
           if (eventName === 'checkout.completed') {
             const eventData = event.data as
-              | { custom_data?: { plan?: 'pro' | 'token_pack' } }
+              | {
+                  id?: string;
+                  transaction_id?: string;
+                  subscription_id?: string;
+                  custom_data?: { plan?: 'pro' | 'token_pack' };
+                }
               | undefined;
             const completedPlan =
               eventData?.custom_data?.plan || selectedPlanRef.current;
+            const paddleVerifiedId =
+              eventData?.subscription_id || eventData?.transaction_id || eventData?.id;
 
-            void completeCheckoutSync(completedPlan).catch((err) => {
-              console.error('[Paddle Post-Checkout Sync Error]', err);
+            void completeCheckoutSync(completedPlan, paddleVerifiedId).catch((err) => {
+              console.warn('[Paddle Post-Checkout Sync Notice]', err);
             });
             return;
           }
