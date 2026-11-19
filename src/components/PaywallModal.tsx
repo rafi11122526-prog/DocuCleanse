@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { initializePaddle, type Paddle } from '@paddle/paddle-js';
-import { Check, CreditCard, Loader2, Lock, ShieldCheck, X } from 'lucide-react';
+import {
+  Building2,
+  Check,
+  Copy,
+  CreditCard,
+  Loader2,
+  Lock,
+  Mail,
+  ShieldCheck,
+  X,
+} from 'lucide-react';
 import {
   completeSandboxCheckout,
   createCheckoutSession,
@@ -63,6 +73,17 @@ export function PaywallModal({
   const [paddle, setPaddle] = useState<Paddle | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copiedPilotEmail, setCopiedPilotEmail] = useState(false);
+
+  const handleCopyPilotEmail = async () => {
+    try {
+      await navigator.clipboard.writeText('ru2275353@gmail.com');
+      setCopiedPilotEmail(true);
+      window.setTimeout(() => setCopiedPilotEmail(false), 2000);
+    } catch {
+      // Clipboard unavailable in restricted context
+    }
+  };
 
   const selectedPlanRef = useRef<'pro' | 'token_pack'>(selectedPlan);
   selectedPlanRef.current = selectedPlan;
@@ -308,7 +329,7 @@ export function PaywallModal({
                 </li>
                 <li className="flex items-center gap-2">
                   <Check className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-                  <span>Multi-sheet XLSX &amp; Executive Summary PDF</span>
+                  <span>Multi-sheet XLSX &amp; Pre-Audit Processing Report PDF</span>
                 </li>
                 <li className="flex items-center gap-2">
                   <Check className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
@@ -345,7 +366,7 @@ export function PaywallModal({
                 </li>
                 <li className="flex items-center gap-2">
                   <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                  <span>Unlocks XLSX &amp; Executive Summary PDF</span>
+                  <span>Unlocks XLSX &amp; Pre-Audit Processing Report PDF</span>
                 </li>
                 <li className="flex items-center gap-2">
                   <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
@@ -353,6 +374,50 @@ export function PaywallModal({
                 </li>
               </ul>
             </button>
+          </div>
+
+          {/* Commercial B2B Inquiry Option — 14-Day Assisted Ledger Pilot ($450) */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 px-4 py-3">
+            <div className="flex items-start gap-2.5 min-w-0">
+              <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                <Building2 className="h-3.5 w-3.5" />
+              </div>
+              <div className="text-xs leading-relaxed text-slate-700 dark:text-slate-300">
+                Need custom institutional integration or managed reconciliation? Inquire about our{' '}
+                <strong className="font-semibold text-slate-900 dark:text-slate-100">
+                  14-Day Assisted Ledger Pilot ($450)
+                </strong>
+                .
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleCopyPilotEmail}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                title="Copy inquiry email: ru2275353@gmail.com"
+              >
+                {copiedPilotEmail ? (
+                  <>
+                    <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                    <span>Email Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3 w-3" />
+                    <span>Copy Email</span>
+                  </>
+                )}
+              </button>
+              <a
+                href="mailto:ru2275353@gmail.com?subject=DocuCleanse%2014-Day%20Assisted%20Ledger%20Pilot%20(%24450)"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-slate-100 px-3 py-1.5 text-[11px] font-semibold text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white transition-colors whitespace-nowrap"
+              >
+                <Mail className="h-3 w-3 shrink-0" />
+                <span>Inquire Now</span>
+              </a>
+            </div>
           </div>
 
           {error && (

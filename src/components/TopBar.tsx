@@ -147,7 +147,7 @@ export function TopBar({
             type="button"
             onClick={onOpenSecurityBrief}
             className="group flex items-center gap-2 text-left text-[11px] text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors min-w-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 rounded"
-            aria-label="Open Security and Architecture Brief"
+            aria-label="Open Security and Compliance Brief"
           >
             <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
             <span className="truncate">
@@ -163,7 +163,7 @@ export function TopBar({
             onClick={onOpenSecurityBrief}
             className="hidden sm:inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-blue-600 dark:text-sky-400 hover:bg-blue-50 dark:hover:bg-sky-950/50 transition-colors whitespace-nowrap shrink-0"
           >
-            <span>Security &amp; Architecture Brief</span>
+            <span>Security &amp; Compliance Brief</span>
             <ChevronRight className="h-3 w-3 shrink-0" />
           </button>
         </div>

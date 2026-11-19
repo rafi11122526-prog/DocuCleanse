@@ -1108,7 +1108,7 @@ export async function downloadExportFile(
     const fileName =
       match?.[1] ||
       (format === 'certificate'
-        ? `docucleanse_pre_audit_attestation_certificate.pdf`
+        ? `docucleanse_pre_audit_processing_report.pdf`
         : `docucleanse_export.${format}`);
     return { blob, fileName };
   } catch (err) {
@@ -1255,7 +1255,7 @@ export async function downloadExportFile(
         ['Identified Leakage / Negative Exposure', Number(negExp.toFixed(2))],
         ['Net Reconciled Inflow', Number((gross - negExp).toFixed(2))],
       ];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(certRows), 'Pre-Audit_Attestation');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(certRows), 'Audit_Metadata');
 
       const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
       return {

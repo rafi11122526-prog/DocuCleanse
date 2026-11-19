@@ -18,12 +18,12 @@ interface SecurityArchitectureModalProps {
   onClose: () => void;
 }
 
-const ARCHITECTURE_BRIEF_TEXT = `DOCUCLEANSE — SECURITY & ARCHITECTURE 1-PAGER (RAFI DIGITAL STUDIO)
+const ARCHITECTURE_BRIEF_TEXT = `DOCUCLEANSE — SECURITY & COMPLIANCE BRIEF (RAFI DIGITAL STUDIO)
 ----------------------------------------------------------------------
 1. Ephemeral In-Memory RAM Processing
    - All incoming CSV, XLSX, PDF, and image uploads are ingested strictly via in-memory RAM buffers (multer.memoryStorage()).
    - No raw client files are staged to /tmp, local uploads/ directories, or unencrypted disk volumes.
-   - Immediately upon parsing completion or error, raw file buffers are deterministically zeroized in a try/finally lifecycle block (buffer.fill(0)) with defensive temp-path unlinking.
+   - Immediately upon parsing completion or error, raw file buffers are deterministically zeroized in a try/finally lifecycle block (buffer.fill(0)) with defensive fs.unlinkSync() cleanup.
 
 2. Zero Permanent Raw File Persistence
    - Raw financial spreadsheets, ledgers, and supplier receipts are never written to third-party cloud buckets or permanent file storage.
@@ -33,9 +33,9 @@ const ARCHITECTURE_BRIEF_TEXT = `DOCUCLEANSE — SECURITY & ARCHITECTURE 1-PAGER
    - Client documents are never used to train, fine-tune, or evaluate external foundation models.
    - Tabular reconciliation (date ISO-8601 standardization, multi-currency isolation, formula error repair, phone formatting, and variance checksums) runs deterministically inside isolated server memory.
 
-4. Cryptographic SHA-256 Ledger & Pre-Audit Chain of Custody
+4. Cryptographic SHA-256 Source Integrity Seals
    - A 64-character SHA-256 cryptographic digest is computed over the exact raw byte stream prior to parsing.
-   - The identical SHA-256 hash, UTC execution timestamp, row verification checksum (Ingested / Cleaned), and reconciliation confidence score are embedded across the UI Audit Trail, HTTP export headers (X-DocuCleanse-SHA256), CSV metadata headers, live-formula XLSX Audit Certificates, and signed PDF Pre-Audit Attestation Certificates.
+   - The identical SHA-256 hash, UTC execution timestamp, row verification checksum (Ingested / Cleaned), and reconciliation confidence score are embedded across the UI Audit Trail, HTTP export headers (X-DocuCleanse-SHA256), live-formula XLSX Audit_Metadata tabs, and PDF Pre-Audit Processing Reports.
 
 5. Multi-Currency Accounting Precision & Export Integrity
    - Mixed currencies (USD, EUR, GBP, CAD, AUD, JPY, etc.) are isolated by ISO-4217 code without unhedged cross-FX mixing, and face-value totals are explicitly labeled as Unconverted Multi-Currency Face Value.
@@ -98,10 +98,10 @@ export function SecurityArchitectureModal({
                 id="security-brief-title"
                 className="mt-0.5 text-base font-bold tracking-tight text-white"
               >
-                Security &amp; Architecture Brief
+                Security &amp; Compliance Brief
               </h2>
               <p className="mt-0.5 text-xs text-slate-300">
-                Rafi Digital Studio · Institutional Data Assurance, Zero-Retention Lifecycle &amp; Cryptographic Audit Integrity
+                Rafi Digital Studio · Volatile RAM Processing, SHA-256 Source Integrity &amp; Zero LLM Training
               </p>
             </div>
           </div>
@@ -110,7 +110,7 @@ export function SecurityArchitectureModal({
             type="button"
             onClick={onClose}
             className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
-            aria-label="Close Security & Architecture Brief"
+            aria-label="Close Security & Compliance Brief"
           >
             <X className="h-5 w-5" />
           </button>
@@ -173,8 +173,9 @@ export function SecurityArchitectureModal({
                 Every uploaded file is hashed via SHA-256 over its exact raw byte stream prior to
                 parsing. The full 64-character digest, UTC timestamp, row verification checksum, and
                 confidence score propagate identically into the UI, HTTP headers (
-                <code className="font-mono text-[11px]">X-DocuCleanse-SHA256</code>), CSV, XLSX, and
-                signed PDF Attestation Certificates.
+                <code className="font-mono text-[11px]">X-DocuCleanse-SHA256</code>), XLSX{' '}
+                <code className="font-mono text-[11px]">Audit_Metadata</code>, and PDF Pre-Audit
+                Processing Reports.
               </p>
             </div>
           </div>
@@ -201,9 +202,11 @@ export function SecurityArchitectureModal({
                 <code className="font-mono text-[11px]">=SUMIFS</code>).
               </li>
               <li>
-                <strong className="text-slate-800 dark:text-slate-100">Pre-Audit PDF</strong> embeds
-                the verbatim 64-character SHA-256 digest, UTC timestamp, row checksums, and Rafi
-                Digital Studio executive attestation block.
+                <strong className="text-slate-800 dark:text-slate-100">
+                  Pre-Audit Processing Report
+                </strong>{' '}
+                embeds the verbatim 64-character SHA-256 digest, UTC timestamp, row checksums, and
+                Rafi Digital Studio executive sign-off block.
               </li>
               <li>
                 Billing &amp; PCI-DSS card handling is delegated exclusively to{' '}

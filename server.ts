@@ -167,9 +167,9 @@ async function startServer() {
         if (uploadedFile?.buffer && Buffer.isBuffer(uploadedFile.buffer)) {
           uploadedFile.buffer.fill(0);
         }
-        if (uploadedFile?.path) {
+        if (uploadedFile?.path && fs.existsSync(uploadedFile.path)) {
           try {
-            await fs.promises.rm(uploadedFile.path, { force: true });
+            fs.unlinkSync(uploadedFile.path);
           } catch {
             // Ignore already-removed temp paths
           }
@@ -198,7 +198,7 @@ async function startServer() {
     res.json({ job });
   });
 
-  // Formal Pre-Audit Attestation Certificate PDF (always downloadable for compliance verification)
+  // Pre-Audit Processing Report PDF (always downloadable for compliance verification)
   app.get('/api/export/:jobId/certificate', async (req, res) => {
     try {
       const userId = resolveUserId(req);
@@ -234,11 +234,11 @@ async function startServer() {
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="${baseName}_pre_audit_attestation_certificate.pdf"`
+        `attachment; filename="${baseName}_pre_audit_processing_report.pdf"`
       );
       res.send(buffer);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Attestation certificate export failed.';
+      const message = err instanceof Error ? err.message : 'Pre-Audit Processing Report export failed.';
       res.status(500).json({ error: message });
     }
   });
@@ -317,7 +317,7 @@ async function startServer() {
           action: 'export_pdf',
         });
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="${baseName}_pre_audit_certificate.pdf"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${baseName}_pre_audit_processing_report.pdf"`);
         res.send(buffer);
         return;
       }

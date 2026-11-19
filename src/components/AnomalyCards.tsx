@@ -277,7 +277,7 @@ export function AnomalyCards({ job, onExport, exportingFormat }: AnomalyCardsPro
               ·
             </span>
             <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 truncate hidden sm:inline">
-              Cert {job.id}
+              Report {job.id}
             </span>
           </div>
 
@@ -313,8 +313,8 @@ export function AnomalyCards({ job, onExport, exportingFormat }: AnomalyCardsPro
                 <FileSignature className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   {exportingFormat === 'certificate'
-                    ? 'Signing Certificate PDF...'
-                    : 'Download Formal Pre-Audit Attestation Certificate'}
+                    ? 'Generating Report PDF...'
+                    : 'Download Pre-Audit Processing Report'}
                 </span>
               </button>
             )}

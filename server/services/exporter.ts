@@ -425,7 +425,7 @@ export function generateCsvBuffer(job: CleanJobRecord): Buffer {
  *   * tax_rate -> numeric percentage float (0% / 0.00%)
  *   * total_amount -> live Excel formula (=F2*G2) with native currency format
  *   * contact_phone -> forced Text/String (@) so Excel never renders 5.55E+09
- * - Tab 2 ("Pre-Audit_Attestation"): Institutional SHA-256, UTC Timestamp, Row Checksum,
+ * - Tab 2 ("Audit_Metadata"): Institutional SHA-256, UTC Timestamp, Row Checksum,
  *   Synchronized Confidence Score, Detected Currencies, Synchronized Gross/Net Totals,
  *   and live SUMIFS isolated currency subtotals.
  */
@@ -716,15 +716,15 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
   });
 
   // ============================================================================
-  // TAB 2: Pre-Audit_Attestation (Institutional Metadata & Synchronized Totals)
+  // TAB 2: Audit_Metadata (Institutional Metadata & Synchronized Totals)
   // ============================================================================
-  const wsCert = wb.addWorksheet('Pre-Audit_Attestation', {
+  const wsCert = wb.addWorksheet('Audit_Metadata', {
     views: [{ state: 'frozen', ySplit: 2 }],
   });
 
   wsCert.mergeCells('A1:B1');
   const titleCell = wsCert.getCell('A1');
-  titleCell.value = 'DocuCleanse — Formal Pre-Audit Attestation & Reconciliation Certificate';
+  titleCell.value = 'DocuCleanse — Pre-Audit Processing Report & Audit Metadata';
   titleCell.fill = headerFill;
   titleCell.font = { name: 'Calibri', size: 13, bold: true, color: { argb: 'FFFFFFFF' } };
   titleCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
@@ -761,7 +761,7 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
       label: 'Enterprise Privacy Shield',
       value: 'Ephemeral RAM Processing · Zero Permanent Data Storage · GDPR & Pre-Audit Ready',
     },
-    { label: 'Certificate / Job ID', value: job.id },
+    { label: 'Report / Job ID', value: job.id },
     { label: 'Source File Name', value: job.fileName },
     { label: 'Document Classification', value: job.documentCategory.replace('_', ' ') },
     { label: 'File Hash (SHA-256)', value: meta.fileHashSha256, numFmt: '@' },
@@ -1018,7 +1018,7 @@ export async function generateSummaryPdfBuffer(job: CleanJobRecord): Promise<Buf
       size: 'LETTER',
       margin: 44,
       info: {
-        Title: `Formal Pre-Audit Attestation Certificate — ${job.fileName}`,
+        Title: `Pre-Audit Processing Report — ${job.fileName}`,
         Author: 'Rafi Digital Studio — DocuCleanse Enterprise',
         Subject: `SHA-256: ${meta.fileHashSha256}`,
       },
@@ -1029,7 +1029,7 @@ export async function generateSummaryPdfBuffer(job: CleanJobRecord): Promise<Buf
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    // Formal Certificate Banner Header
+    // Pre-Audit Processing Report Banner Header
     const bannerTop = 36;
     doc.rect(44, bannerTop, 524, 66).fill('#0F172A');
 
@@ -1044,8 +1044,8 @@ export async function generateSummaryPdfBuffer(job: CleanJobRecord): Promise<Buf
     doc
       .fillColor('#FFFFFF')
       .font('Helvetica-Bold')
-      .fontSize(15.5)
-      .text('Formal Pre-Audit Attestation Certificate', 58, bannerTop + 26);
+      .fontSize(16)
+      .text('Pre-Audit Processing Report', 58, bannerTop + 26);
 
     doc
       .fillColor('#CBD5E1')
@@ -1061,7 +1061,7 @@ export async function generateSummaryPdfBuffer(job: CleanJobRecord): Promise<Buf
       .fillColor('#E2E8F0')
       .font('Courier-Bold')
       .fontSize(8.5)
-      .text(`CERT ID: ${job.id.toUpperCase()}`, 380, bannerTop + 13, { width: 174, align: 'right' });
+      .text(`REPORT ID: ${job.id.toUpperCase()}`, 380, bannerTop + 13, { width: 174, align: 'right' });
 
     doc
       .fillColor('#93C5FD')
@@ -1323,7 +1323,7 @@ export async function generateSummaryPdfBuffer(job: CleanJobRecord): Promise<Buf
       doc.moveDown(0.15);
     }
 
-    // Formal Executive Attestation & Signature Block for Rafi Digital Studio
+    // Pre-Audit Processing Summary & Executive Sign-Off Block for Rafi Digital Studio
     if (doc.y > 610) {
       doc.addPage();
     } else {
@@ -1339,14 +1339,14 @@ export async function generateSummaryPdfBuffer(job: CleanJobRecord): Promise<Buf
       .fillColor('#0F172A')
       .font('Helvetica-Bold')
       .fontSize(8.5)
-      .text('FORMAL PRE-AUDIT ATTESTATION & EXECUTIVE SIGN-OFF', 58, sigTop + 11);
+      .text('PRE-AUDIT PROCESSING SUMMARY & EXECUTIVE SIGN-OFF', 58, sigTop + 11);
 
     doc
       .fillColor('#475569')
       .font('Helvetica')
       .fontSize(7.8)
       .text(
-        `This certificate attests that ${meta.rowsIngested} source records were deterministically normalized into ${meta.rowsCleaned} verified records in ephemeral RAM with zero permanent data storage (GDPR & Pre-Audit Ready), cryptographically bound to SHA-256 digest ${meta.fileHashSha256.slice(0, 32)}... at ${formatUtcTimestamp(meta.timestampUtc)}.`,
+        `This Pre-Audit Processing Report confirms that ${meta.rowsIngested} source records were deterministically normalized into ${meta.rowsCleaned} verified records in ephemeral RAM with zero permanent data storage (GDPR & Pre-Audit Ready), cryptographically bound to SHA-256 digest ${meta.fileHashSha256.slice(0, 32)}... at ${formatUtcTimestamp(meta.timestampUtc)}.`,
         58,
         sigTop + 24,
         { width: 496, lineGap: 2 }
@@ -1387,7 +1387,7 @@ export async function generateSummaryPdfBuffer(job: CleanJobRecord): Promise<Buf
       .fillColor('#15803D')
       .font('Helvetica-Bold')
       .fontSize(7.5)
-      .text('VERIFIED PRE-AUDIT SEAL', 344, sigTop + 63);
+      .text('PRE-AUDIT INTEGRITY SEAL', 344, sigTop + 63);
 
     doc
       .fillColor('#1E293B')
