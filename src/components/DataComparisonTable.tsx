@@ -27,6 +27,8 @@ export function DataComparisonTable({
   const [viewMode, setViewMode] = useState<TableViewMode>('split');
   const [searchQuery, setSearchQuery] = useState('');
   const [onlyModifiedRows, setOnlyModifiedRows] = useState(false);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 100;
 
   const proExportsUnlocked = quota?.canExportProFormats ?? false;
   const freeQuotaExhausted =
@@ -63,6 +65,13 @@ export function DataComparisonTable({
     return indices;
   }, [job.cleanedRows, job.rawRows, modifiedRowIndices, onlyModifiedRows, searchQuery]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredRowIndices.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const visibleRowIndices = useMemo(() => {
+    const start = (safePage - 1) * PAGE_SIZE;
+    return filteredRowIndices.slice(start, start + PAGE_SIZE);
+  }, [filteredRowIndices, safePage]);
+
   return (
     <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
       {/* Toolbar Header */}
@@ -98,7 +107,10 @@ export function DataComparisonTable({
                 <input
                   type="text"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setPage(1);
+                  }}
                   placeholder="Filter rows..."
                   className="h-8 w-44 sm:w-56 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 pl-8 pr-3 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none"
                 />
@@ -108,7 +120,10 @@ export function DataComparisonTable({
                 <input
                   type="checkbox"
                   checked={onlyModifiedRows}
-                  onChange={(e) => setOnlyModifiedRows(e.target.checked)}
+                  onChange={(e) => {
+                    setOnlyModifiedRows(e.target.checked);
+                    setPage(1);
+                  }}
                   className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-600"
                 />
                 <span>Modified rows only ({modifiedRowIndices.size})</span>
@@ -229,7 +244,7 @@ export function DataComparisonTable({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70 text-xs font-mono tabular-nums">
-                  {filteredRowIndices.map((rIdx) => {
+                  {visibleRowIndices.map((rIdx) => {
                     const row = job.rawRows[rIdx] || {};
                     return (
                       <tr key={rIdx} className="h-10 hover:bg-slate-50 dark:hover:bg-slate-800/40">
@@ -289,7 +304,7 @@ export function DataComparisonTable({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70 text-xs font-mono tabular-nums">
-                  {filteredRowIndices.map((rIdx) => {
+                  {visibleRowIndices.map((rIdx) => {
                     const row = job.cleanedRows[rIdx] || {};
                     return (
                       <tr key={rIdx} className="h-10 hover:bg-slate-50 dark:hover:bg-slate-800/40">
@@ -346,7 +361,7 @@ export function DataComparisonTable({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70 text-xs font-mono tabular-nums">
-              {filteredRowIndices.map((rIdx) => {
+              {visibleRowIndices.map((rIdx) => {
                 const row = job.cleanedRows[rIdx] || {};
                 return (
                   <tr key={rIdx} className="h-10 hover:bg-slate-50 dark:hover:bg-slate-800/40">
@@ -389,6 +404,37 @@ export function DataComparisonTable({
       {filteredRowIndices.length === 0 && viewMode !== 'schema' && (
         <div className="py-10 text-center text-xs text-slate-500 dark:text-slate-400">
           No rows match your current filter.
+        </div>
+      )}
+
+      {viewMode !== 'schema' && filteredRowIndices.length > PAGE_SIZE && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 dark:border-slate-800 px-5 py-3 text-xs text-slate-500 dark:text-slate-400">
+          <span className="font-mono tabular-nums">
+            Showing {((safePage - 1) * PAGE_SIZE + 1).toLocaleString()}–
+            {Math.min(safePage * PAGE_SIZE, filteredRowIndices.length).toLocaleString()} of{' '}
+            {filteredRowIndices.length.toLocaleString()} rows
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={safePage <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="rounded-md border border-slate-200 dark:border-slate-700 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
+            >
+              Previous
+            </button>
+            <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200">
+              Page {safePage} / {totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={safePage >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              className="rounded-md border border-slate-200 dark:border-slate-700 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0"
+            >
+              Next
+            </button>
+          </div>
         </div>
       )}
     </section>

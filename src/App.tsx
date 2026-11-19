@@ -11,7 +11,9 @@ import { AnomalyCards } from './components/AnomalyCards';
 import { BillingWebhooksView } from './components/BillingWebhooksView';
 import { DataComparisonTable } from './components/DataComparisonTable';
 import { DataVisualizer } from './components/DataVisualizer';
+import { Footer } from './components/Footer';
 import { HistoryView } from './components/HistoryView';
+import { LegalModal, type LegalDocSection } from './components/LegalModal';
 import { PaywallModal } from './components/PaywallModal';
 import { Sidebar, type ActiveTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
@@ -61,6 +63,14 @@ export default function App() {
   const [paywall, setPaywall] = useState<PaywallContext>({
     open: false,
     reason: '',
+  });
+
+  const [legalModal, setLegalModal] = useState<{
+    open: boolean;
+    section: LegalDocSection;
+  }>({
+    open: false,
+    section: 'terms',
   });
 
   useEffect(() => {
@@ -170,7 +180,7 @@ export default function App() {
       setPaywall({
         open: true,
         reason:
-          'You have reached your Free tier monthly limit. Upgrade to Pro ($19/mo) or grab a $5 Token Pack to continue exporting.',
+          'You have reached your Free tier monthly limit. Upgrade to Pro ($29/mo) or grab a $5 Token Pack to continue exporting.',
         code: 'EXPORT_LIMIT_REACHED',
       });
       return;
@@ -410,6 +420,9 @@ export default function App() {
                 }}
               />
             )}
+            <Footer
+              onOpenLegal={(section) => setLegalModal({ open: true, section })}
+            />
           </div>
         </main>
       </div>
@@ -422,6 +435,13 @@ export default function App() {
           setQuota(nextQuota);
           setBanner({ type: 'success', message });
         }}
+      />
+
+      <LegalModal
+        open={legalModal.open}
+        activeSection={legalModal.section}
+        onSelectSection={(section) => setLegalModal({ open: true, section })}
+        onClose={() => setLegalModal((prev) => ({ ...prev, open: false }))}
       />
     </div>
   );

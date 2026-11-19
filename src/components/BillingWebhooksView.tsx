@@ -9,14 +9,18 @@ interface BillingWebhooksViewProps {
   onQuotaUpdated: (quota: QuotaSnapshot, message: string) => void;
 }
 
+type PaddleEventKind = 'subscription.activated' | 'transaction.completed' | 'subscription.canceled';
+
 export function BillingWebhooksView({
   quota,
   onOpenPaywall,
   onQuotaUpdated,
 }: BillingWebhooksViewProps) {
   const [events, setEvents] = useState<BillingEvent[]>([]);
-  const [provider, setProvider] = useState<'stripe' | 'lemonsqueezy'>('stripe');
-  const [tier, setTier] = useState<'pro' | 'token_pack'>('pro');
+  const [provider, setProvider] = useState<'paddle' | 'stripe'>('paddle');
+  const [paddleEventKind, setPaddleEventKind] =
+    useState<PaddleEventKind>('subscription.activated');
+  const [stripeTier, setStripeTier] = useState<'pro' | 'token_pack'>('pro');
   const [testingWebhook, setTestingWebhook] = useState(false);
   const [lastWebhookResponse, setLastWebhookResponse] = useState<string | null>(null);
 
@@ -34,33 +38,62 @@ export function BillingWebhooksView({
   }, [quota?.plan, quota?.tokenBalance]);
 
   const samplePayload =
-    provider === 'stripe'
+    provider === 'paddle'
       ? {
+          event_id: 'evt_pdl_test_2026',
+          event_type: paddleEventKind,
+          data: {
+            custom_data: {
+              userId: quota?.userId || 'usr_demo_freelancer',
+              plan:
+                paddleEventKind === 'transaction.completed'
+                  ? 'token_pack'
+                  : paddleEventKind === 'subscription.canceled'
+                  ? 'free'
+                  : 'pro',
+              tokensToAdd: paddleEventKind === 'transaction.completed' ? 15 : 0,
+            },
+            details: {
+              totals: {
+                total:
+                  paddleEventKind === 'transaction.completed'
+                    ? '500'
+                    : paddleEventKind === 'subscription.canceled'
+                    ? '0'
+                    : '2900',
+              },
+            },
+            items: [
+              {
+                price: {
+                  id:
+                    paddleEventKind === 'transaction.completed'
+                      ? /^pri_[a-z0-9]{20,}$/.test(
+                          String(import.meta.env.VITE_PADDLE_TOKEN_PACK_PRICE_ID || '').trim()
+                        )
+                        ? String(import.meta.env.VITE_PADDLE_TOKEN_PACK_PRICE_ID).trim()
+                        : 'pri_01m7s0y3v873p7gxwr0v1ggc6c'
+                      : /^pri_[a-z0-9]{20,}$/.test(
+                          String(import.meta.env.VITE_PADDLE_PRO_PRICE_ID || '').trim()
+                        )
+                      ? String(import.meta.env.VITE_PADDLE_PRO_PRICE_ID).trim()
+                      : 'pri_01m7r5t4g1487ktfj68gzrs431',
+                },
+              },
+            ],
+          },
+        }
+      : {
           id: 'evt_stripe_test_2026',
           type: 'checkout.session.completed',
           data: {
             object: {
-              amount_total: tier === 'pro' ? 1900 : 500,
+              amount_total: stripeTier === 'pro' ? 2900 : 500,
               metadata: {
                 userId: quota?.userId || 'usr_demo_freelancer',
-                tier,
-                tokensToAdd: tier === 'token_pack' ? 15 : 0,
+                tier: stripeTier,
+                tokensToAdd: stripeTier === 'token_pack' ? 15 : 0,
               },
-            },
-          },
-        }
-      : {
-          meta: {
-            event_name: 'order_created',
-            custom_data: {
-              user_id: quota?.userId || 'usr_demo_freelancer',
-              tier,
-              tokens_to_add: tier === 'token_pack' ? 15 : 0,
-            },
-          },
-          data: {
-            attributes: {
-              total: tier === 'pro' ? 1900 : 500,
             },
           },
         };
@@ -71,10 +104,13 @@ export function BillingWebhooksView({
       const data = await dispatchTestWebhook(provider, samplePayload);
       setLastWebhookResponse(JSON.stringify(data, null, 2));
       if (data.quota) {
-        onQuotaUpdated(
-          data.quota,
-          `Processed ${provider} webhook for ${tier === 'pro' ? 'Pro ($19/mo)' : '15-Token Pack ($5)'}.`
-        );
+        const label =
+          provider === 'paddle'
+            ? paddleEventKind
+            : stripeTier === 'pro'
+            ? 'Pro ($29/mo)'
+            : '15-Token Pack ($5)';
+        onQuotaUpdated(data.quota, `Processed ${provider} webhook (${label}).`);
       }
       await loadBillingStatus();
     } catch (err) {
@@ -98,7 +134,7 @@ export function BillingWebhooksView({
             Plans, Limits &amp; Payment Webhooks
           </h1>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Transparent unit economics, quota enforcement, and live Stripe / Lemon Squeezy webhook handlers.
+            Transparent unit economics, quota enforcement, and live Paddle Billing / Stripe webhook handlers.
           </p>
         </div>
 
@@ -132,7 +168,7 @@ export function BillingWebhooksView({
               <td className="py-3 px-5 font-medium text-slate-900 dark:text-slate-100">Pricing</td>
               <td className="py-3 px-5 font-mono tabular-nums">$0 / month</td>
               <td className="py-3 px-5 font-mono tabular-nums">$5 one-time (15 cleans)</td>
-              <td className="py-3 px-5 font-mono tabular-nums font-semibold">$19 / month</td>
+              <td className="py-3 px-5 font-mono tabular-nums font-semibold">$29 / month</td>
             </tr>
             <tr>
               <td className="py-3 px-5 font-medium text-slate-900 dark:text-slate-100">
@@ -189,6 +225,17 @@ export function BillingWebhooksView({
             <div className="flex items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1">
               <button
                 type="button"
+                onClick={() => setProvider('paddle')}
+                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  provider === 'paddle'
+                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                Paddle Billing
+              </button>
+              <button
+                type="button"
                 onClick={() => setProvider('stripe')}
                 className={`rounded-md px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                   provider === 'stripe'
@@ -198,43 +245,57 @@ export function BillingWebhooksView({
               >
                 Stripe Webhook
               </button>
-              <button
-                type="button"
-                onClick={() => setProvider('lemonsqueezy')}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  provider === 'lemonsqueezy'
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400'
-                }`}
-              >
-                Lemon Squeezy
-              </button>
             </div>
 
-            <div className="flex items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1">
-              <button
-                type="button"
-                onClick={() => setTier('pro')}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  tier === 'pro'
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400'
-                }`}
-              >
-                Grant Pro ($19)
-              </button>
-              <button
-                type="button"
-                onClick={() => setTier('token_pack')}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  tier === 'token_pack'
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400'
-                }`}
-              >
-                Grant 15 Tokens ($5)
-              </button>
-            </div>
+            {provider === 'paddle' ? (
+              <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1">
+                {(
+                  [
+                    { id: 'subscription.activated', label: 'subscription.activated' },
+                    { id: 'transaction.completed', label: 'transaction.completed (+15)' },
+                    { id: 'subscription.canceled', label: 'subscription.canceled' },
+                  ] as const
+                ).map((evt) => (
+                  <button
+                    key={evt.id}
+                    type="button"
+                    onClick={() => setPaddleEventKind(evt.id)}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-mono font-medium transition-colors whitespace-nowrap shrink-0 ${
+                      paddleEventKind === evt.id
+                        ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    {evt.label}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="flex items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 p-1">
+                <button
+                  type="button"
+                  onClick={() => setStripeTier('pro')}
+                  className={`rounded-md px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                    stripeTier === 'pro'
+                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  Grant Pro ($29)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStripeTier('token_pack')}
+                  className={`rounded-md px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                    stripeTier === 'token_pack'
+                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  Grant 15 Tokens ($5)
+                </button>
+              </div>
+            )}
           </div>
 
           <pre className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 p-3 text-[11px] font-mono text-slate-700 dark:text-slate-300 overflow-x-auto">

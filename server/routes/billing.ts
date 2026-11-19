@@ -2,25 +2,87 @@ import crypto from 'node:crypto';
 import express from 'express';
 import {
   applyBillingUpgrade,
+  applySubscriptionCanceled,
   db,
   exhaustFreeQuotaForTesting,
   getUserQuotaSnapshot,
+  recordBillingAuditEvent,
   resetAccountToFreeForTesting,
 } from '../db.ts';
 import { resolveUserId } from '../middleware/monetization.ts';
 
 export const billingRouter = express.Router();
 
+function resolveValidPaddlePriceId(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  if (trimmed && /^pri_[a-z0-9]{20,}$/.test(trimmed)) {
+    return trimmed;
+  }
+  return fallback;
+}
+
+const PADDLE_PRO_PRICE_ID = resolveValidPaddlePriceId(
+  process.env.VITE_PADDLE_PRO_PRICE_ID,
+  'pri_01m7r5t4g1487ktfj68gzrs431'
+);
+const PADDLE_TOKEN_PACK_PRICE_ID = resolveValidPaddlePriceId(
+  process.env.VITE_PADDLE_TOKEN_PACK_PRICE_ID,
+  'pri_01m7s0y3v873p7gxwr0v1ggc6c'
+);
+
+function isConfiguredSecret(value: string | undefined): boolean {
+  if (!value) return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return !/placeholder|your_server_api_key/i.test(trimmed);
+}
+
 /**
- * Initiates a Stripe or Lemon Squeezy checkout session.
- * In sandbox mode (when STRIPE_SECRET_KEY is placeholder/unset), returns a sandbox checkout token
- * that can be fulfilled immediately or via webhook simulation.
+ * Verifies Paddle Billing `paddle-signature` header (`ts=<unix>;h1=<hmac_sha256_hex>`)
+ * using HMAC SHA-256 over `${ts}:${rawBody}` with PADDLE_WEBHOOK_SECRET_KEY.
  */
-billingRouter.post('/checkout', (req, res) => {
+function verifyPaddleSignature(
+  rawBody: string,
+  signatureHeader: string | undefined,
+  secretKey: string
+): boolean {
+  if (!signatureHeader) return false;
+
+  const parts = Object.fromEntries(
+    signatureHeader.split(';').map((segment) => {
+      const [k, ...rest] = segment.trim().split('=');
+      return [k, rest.join('=')];
+    })
+  );
+
+  const ts = parts.ts;
+  const h1 = parts.h1;
+  if (!ts || !h1) return false;
+
+  const signedPayload = `${ts}:${rawBody}`;
+  const expectedHex = crypto
+    .createHmac('sha256', secretKey)
+    .update(signedPayload, 'utf8')
+    .digest('hex');
+
+  const expectedBuf = Buffer.from(expectedHex, 'hex');
+  const receivedBuf = Buffer.from(h1, 'hex');
+  if (expectedBuf.length !== receivedBuf.length) return false;
+
+  return crypto.timingSafeEqual(expectedBuf, receivedBuf);
+}
+
+/**
+ * Initiates a Paddle or Stripe checkout session.
+ * When PADDLE_API_KEY is configured, creates a Paddle transaction server-side so client-side
+ * checkout receives a verified transactionId (and catches 403/domain/price errors cleanly).
+ * Otherwise returns sandbox checkout metadata for seamless local testing.
+ */
+billingRouter.post('/checkout', async (req, res) => {
   const userId = resolveUserId(req);
-  const { plan = 'pro', provider = 'stripe' } = req.body as {
+  const { plan = 'pro', provider = 'paddle' } = req.body as {
     plan?: 'pro' | 'token_pack';
-    provider?: 'stripe' | 'lemonsqueezy';
+    provider?: 'stripe' | 'paddle';
   };
 
   if (plan !== 'pro' && plan !== 'token_pack') {
@@ -28,40 +90,106 @@ billingRouter.post('/checkout', (req, res) => {
     return;
   }
 
-  const amountCents = plan === 'pro' ? 1900 : 500;
+  const amountCents = plan === 'pro' ? 2900 : 500;
   const sessionId = `cs_${provider}_${crypto.randomUUID().slice(0, 14)}`;
+  const priceId = plan === 'pro' ? PADDLE_PRO_PRICE_ID : PADDLE_TOKEN_PACK_PRICE_ID;
+
+  let transactionId: string | undefined;
+  let canOpenPaddleOverlay = false;
+  let paddleFallbackReason: string | undefined;
+
+  if (provider === 'paddle' && isConfiguredSecret(process.env.PADDLE_API_KEY)) {
+    const apiKey = process.env.PADDLE_API_KEY!.trim();
+    const isLiveKey =
+      apiKey.startsWith('pdl_live_') ||
+      (!apiKey.startsWith('pdl_sdbx_') && process.env.VITE_PADDLE_ENV === 'production');
+    const paddleApiBase = isLiveKey
+      ? 'https://api.paddle.com'
+      : 'https://sandbox-api.paddle.com';
+
+    try {
+      const paddleRes = await fetch(`${paddleApiBase}/transactions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          items: [{ price_id: priceId, quantity: 1 }],
+          custom_data: {
+            userId,
+            plan,
+          },
+        }),
+      });
+
+      if (paddleRes.ok) {
+        const paddleJson = (await paddleRes.json()) as { data?: { id?: string } };
+        if (paddleJson?.data?.id) {
+          transactionId = paddleJson.data.id;
+          canOpenPaddleOverlay = true;
+        }
+      } else {
+        const errPayload = (await paddleRes.json().catch(() => null)) as {
+          error?: { code?: string; detail?: string };
+        } | null;
+        paddleFallbackReason =
+          errPayload?.error?.detail ||
+          `Paddle API returned HTTP ${paddleRes.status} (${errPayload?.error?.code || 'forbidden'}).`;
+      }
+    } catch (err) {
+      paddleFallbackReason =
+        err instanceof Error ? err.message : 'Unable to reach Paddle Billing API.';
+    }
+  }
 
   res.json({
     sessionId,
     provider,
     plan,
+    priceId: provider === 'paddle' ? priceId : undefined,
+    transactionId,
+    canOpenPaddleOverlay,
+    paddleFallbackReason,
     amountCents,
     sandboxMode:
-      !process.env.STRIPE_SECRET_KEY ||
-      process.env.STRIPE_SECRET_KEY === 'sk_test_placeholder',
+      provider === 'paddle'
+        ? (process.env.VITE_PADDLE_ENV || 'sandbox') !== 'production' ||
+          !isConfiguredSecret(process.env.PADDLE_API_KEY)
+        : !isConfiguredSecret(process.env.STRIPE_SECRET_KEY),
     checkoutMetadata: {
       userId,
       tier: plan,
+      priceId: provider === 'paddle' ? priceId : undefined,
       tokensToAdd: plan === 'token_pack' ? 15 : 0,
     },
   });
 });
 
 /**
- * Completes a sandbox checkout directly (used in demo/preview mode when real Stripe keys aren't configured)
+ * Completes a sandbox checkout directly (used in local preview/test mode)
  */
 billingRouter.post('/sandbox-complete', (req, res) => {
   const userId = resolveUserId(req);
-  const { plan = 'pro', provider = 'stripe' } = req.body as {
+  const { plan = 'pro', provider = 'paddle' } = req.body as {
     plan?: 'pro' | 'token_pack';
-    provider?: 'stripe' | 'lemonsqueezy';
+    provider?: 'stripe' | 'paddle';
   };
 
-  const amountCents = plan === 'pro' ? 1900 : 500;
+  const amountCents = plan === 'pro' ? 2900 : 500;
+  const eventType =
+    provider === 'paddle'
+      ? plan === 'pro'
+        ? 'subscription.activated'
+        : 'transaction.completed'
+      : plan === 'pro'
+      ? 'checkout.session.completed'
+      : 'token_pack.purchased';
+
   const quota = applyBillingUpgrade({
     userId,
     provider,
-    eventType: plan === 'pro' ? 'checkout.session.completed' : 'token_pack.purchased',
+    eventType,
     tier: plan,
     tokensToAdd: plan === 'token_pack' ? 15 : 0,
     amountCents,
@@ -72,16 +200,134 @@ billingRouter.post('/sandbox-complete', (req, res) => {
     ok: true,
     message:
       plan === 'pro'
-        ? 'Upgraded to DocuCleanse Pro ($19/mo) — unlimited cleans & exports unlocked.'
-        : 'Added 15 Pro-grade file clean tokens ($5 Token Pack).',
+        ? `Upgraded to DocuCleanse Pro ($29/mo) via ${provider === 'paddle' ? 'Paddle' : 'Stripe'} — unlimited cleans & exports unlocked.`
+        : `Added 15 Pro-grade file clean tokens ($5 Token Pack) via ${provider === 'paddle' ? 'Paddle' : 'Stripe'}.`,
     quota,
   });
 });
 
 /**
+ * Paddle Billing Webhook Handler
+ * Receives express.raw({ type: 'application/json' }) from server.ts for HMAC SHA-256 verification.
+ * Handles:
+ * - subscription.created / subscription.activated -> users.plan = 'pro'
+ * - transaction.completed / transaction.paid -> token pack (+15 tokens) or pro fulfillment
+ * - subscription.canceled -> reverts users.plan = 'free'
+ */
+billingRouter.post('/webhook/paddle', (req, res) => {
+  const rawBody = Buffer.isBuffer(req.body)
+    ? req.body.toString('utf8')
+    : typeof req.body === 'string'
+    ? req.body
+    : JSON.stringify(req.body ?? {});
+
+  const secretKey = process.env.PADDLE_WEBHOOK_SECRET_KEY;
+  const signatureHeader = req.header('paddle-signature');
+
+  if (secretKey && secretKey !== 'pdl_ntfset_placeholder') {
+    if (!verifyPaddleSignature(rawBody, signatureHeader, secretKey)) {
+      res.status(401).json({ error: 'Invalid Paddle-Signature HMAC SHA-256 verification.' });
+      return;
+    }
+  }
+
+  let event: {
+    event_type?: string;
+    data?: {
+      custom_data?: {
+        userId?: string;
+        user_id?: string;
+        plan?: string;
+        tier?: string;
+        tokensToAdd?: number;
+      };
+      details?: { totals?: { total?: string | number } };
+      items?: Array<{ price?: { id?: string } }>;
+    };
+  };
+
+  try {
+    event = rawBody ? JSON.parse(rawBody) : {};
+  } catch {
+    res.status(400).json({ error: 'Malformed JSON body in Paddle webhook.' });
+    return;
+  }
+
+  const eventType = event?.event_type || 'subscription.activated';
+  const custom = event?.data?.custom_data;
+  const userId = custom?.userId || custom?.user_id || resolveUserId(req);
+
+  const requestedPlan = custom?.plan || custom?.tier;
+  const isTokenPack =
+    requestedPlan === 'token_pack' ||
+    Boolean(
+      event?.data?.items?.some(
+        (item) => item.price?.id === PADDLE_TOKEN_PACK_PRICE_ID
+      )
+    );
+
+  const rawTotal = event?.data?.details?.totals?.total;
+  const parsedTotal =
+    rawTotal !== undefined && rawTotal !== null && !Number.isNaN(Number(rawTotal))
+      ? Number(rawTotal)
+      : isTokenPack
+      ? 500
+      : 2900;
+
+  if (eventType === 'subscription.created' || eventType === 'subscription.activated') {
+    const quota = applyBillingUpgrade({
+      userId,
+      provider: 'paddle',
+      eventType,
+      tier: 'pro',
+      amountCents: parsedTotal,
+      payload: event,
+    });
+    res.json({ received: true, provider: 'paddle', processedEvent: eventType, quota });
+    return;
+  }
+
+  if (eventType === 'transaction.completed' || eventType === 'transaction.paid') {
+    const tier = isTokenPack ? 'token_pack' : 'pro';
+    const quota = applyBillingUpgrade({
+      userId,
+      provider: 'paddle',
+      eventType,
+      tier,
+      tokensToAdd: tier === 'token_pack' ? Number(custom?.tokensToAdd) || 15 : 0,
+      amountCents: parsedTotal,
+      payload: event,
+    });
+    res.json({ received: true, provider: 'paddle', processedEvent: eventType, quota });
+    return;
+  }
+
+  if (eventType === 'subscription.canceled') {
+    const quota = applySubscriptionCanceled({
+      userId,
+      provider: 'paddle',
+      eventType,
+      payload: event,
+    });
+    res.json({ received: true, provider: 'paddle', processedEvent: eventType, quota });
+    return;
+  }
+
+  // Record unhandled Paddle events into billing_events audit table
+  recordBillingAuditEvent({
+    userId,
+    provider: 'paddle',
+    eventType,
+    planGranted: 'audit_only',
+    amountCents: 0,
+    payload: event,
+  });
+
+  res.json({ received: true, provider: 'paddle', ignored: true, eventType });
+});
+
+/**
  * Stripe Webhook Handler Stub
- * Verifies `stripe-signature` HMAC when STRIPE_WEBHOOK_SECRET is configured,
- * then provisions Pro subscription or Token Pack credits in SQLite.
  */
 billingRouter.post('/webhook/stripe', (req, res) => {
   const sig = req.header('stripe-signature');
@@ -111,12 +357,9 @@ billingRouter.post('/webhook/stripe', (req, res) => {
   const meta = event?.data?.object?.metadata;
   const userId = meta?.userId || resolveUserId(req);
   const tier = meta?.tier === 'token_pack' ? 'token_pack' : 'pro';
-  const amountCents = event?.data?.object?.amount_total ?? (tier === 'pro' ? 1900 : 500);
+  const amountCents = event?.data?.object?.amount_total ?? (tier === 'pro' ? 2900 : 500);
 
-  if (
-    eventType === 'checkout.session.completed' ||
-    eventType === 'invoice.paid'
-  ) {
+  if (eventType === 'checkout.session.completed' || eventType === 'invoice.paid') {
     const quota = applyBillingUpgrade({
       userId,
       provider: 'stripe',
@@ -132,53 +375,6 @@ billingRouter.post('/webhook/stripe', (req, res) => {
   }
 
   res.json({ received: true, ignored: true, eventType });
-});
-
-/**
- * Lemon Squeezy Webhook Handler Stub
- * Verifies `x-signature` HMAC SHA-256 when LEMONSQUEEZY_WEBHOOK_SECRET is configured,
- * then fulfills order_created / subscription_payment_success events.
- */
-billingRouter.post('/webhook/lemonsqueezy', (req, res) => {
-  const signature = req.header('x-signature');
-  const secret = process.env.LEMONSQUEEZY_WEBHOOK_SECRET;
-
-  if (secret && secret !== 'ls_whsec_placeholder' && signature) {
-    const hmac = crypto
-      .createHmac('sha256', secret)
-      .update(JSON.stringify(req.body))
-      .digest('hex');
-    if (hmac !== signature) {
-      res.status(401).json({ error: 'Invalid Lemon Squeezy X-Signature header.' });
-      return;
-    }
-  }
-
-  const payload = req.body as {
-    meta?: {
-      event_name?: string;
-      custom_data?: { user_id?: string; tier?: 'pro' | 'token_pack'; tokens_to_add?: number };
-    };
-    data?: { attributes?: { total?: number } };
-  };
-
-  const eventName = payload?.meta?.event_name || 'order_created';
-  const custom = payload?.meta?.custom_data;
-  const userId = custom?.user_id || resolveUserId(req);
-  const tier = custom?.tier === 'token_pack' ? 'token_pack' : 'pro';
-  const amountCents = payload?.data?.attributes?.total ?? (tier === 'pro' ? 1900 : 500);
-
-  const quota = applyBillingUpgrade({
-    userId,
-    provider: 'lemonsqueezy',
-    eventType: eventName,
-    tier,
-    tokensToAdd: Number(custom?.tokens_to_add) || (tier === 'token_pack' ? 15 : 0),
-    amountCents,
-    payload,
-  });
-
-  res.json({ received: true, provider: 'lemonsqueezy', processedEvent: eventName, quota });
 });
 
 /**

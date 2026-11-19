@@ -28,6 +28,20 @@ export interface ParsedBinaryDocumentInput {
 
 export type ParsedUploadResult = ParsedTabularInput | ParsedBinaryDocumentInput;
 
+export const LARGE_DATASET_THRESHOLD = 100;
+export const SCHEMA_SAMPLE_ROW_COUNT = 40;
+
+/**
+ * Extracts a bounded sample of the first N rows for LLM schema, date, and currency detection
+ * so large datasets (>100 rows) avoid token limits and timeouts.
+ */
+export function extractSampleRows(
+  rows: Record<string, string>[],
+  sampleSize = SCHEMA_SAMPLE_ROW_COUNT
+): Record<string, string>[] {
+  return rows.slice(0, Math.min(rows.length, sampleSize));
+}
+
 const FORMULA_ERROR_REGEX = /^#(REF!|DIV\/0!|VALUE!|NAME\?|N\/A|NUM!|NULL!|SPILL!|CALC!)$/i;
 
 function normalizeHeaderName(raw: string, fallbackIndex: number): string {

@@ -91,8 +91,8 @@ const mockState: {
 } = {
   quota: {
     userId: DEMO_USER_ID,
-    email: 'alex.morgan@studio-ledger.io',
-    name: 'Alex Morgan',
+    email: 'ru2275353@gmail.com',
+    name: 'Rafi Digital Studio',
     plan: 'free',
     freeCleansUsedThisMonth: 0,
     freeCleansLimit: 3,
@@ -678,8 +678,15 @@ export async function downloadExportFile(
 
 export async function createCheckoutSession(params: {
   plan: 'pro' | 'token_pack';
-  provider: 'stripe' | 'lemonsqueezy';
-}): Promise<{ sessionId: string }> {
+  provider: 'stripe' | 'paddle';
+}): Promise<{
+  sessionId: string;
+  priceId?: string;
+  transactionId?: string;
+  canOpenPaddleOverlay?: boolean;
+  paddleFallbackReason?: string;
+  sandboxMode?: boolean;
+}> {
   try {
     const res = await fetch('/api/billing/checkout', {
       method: 'POST',
@@ -689,10 +696,17 @@ export async function createCheckoutSession(params: {
       },
       body: JSON.stringify(params),
     });
-    return await parseJsonResponse<{ sessionId: string }>(res);
+    return await parseJsonResponse<{
+      sessionId: string;
+      priceId?: string;
+      transactionId?: string;
+      canOpenPaddleOverlay?: boolean;
+      paddleFallbackReason?: string;
+      sandboxMode?: boolean;
+    }>(res);
   } catch (err) {
     if (shouldUseMockFallback(err)) {
-      return { sessionId: `cs_local_${Date.now()}` };
+      return { sessionId: `cs_local_${Date.now()}`, sandboxMode: true };
     }
     throw err;
   }
@@ -700,7 +714,7 @@ export async function createCheckoutSession(params: {
 
 export async function completeSandboxCheckout(params: {
   plan: 'pro' | 'token_pack';
-  provider: 'stripe' | 'lemonsqueezy';
+  provider: 'stripe' | 'paddle';
 }): Promise<{ ok: boolean; quota: QuotaSnapshot; message: string }> {
   try {
     const res = await fetch('/api/billing/sandbox-complete', {
@@ -723,9 +737,16 @@ export async function completeSandboxCheckout(params: {
       mockState.billingEvents.unshift({
         id: `evt_local_${Date.now()}`,
         provider: params.provider,
-        event_type: params.plan === 'pro' ? 'checkout.session.completed' : 'token_pack.purchased',
+        event_type:
+          params.provider === 'paddle'
+            ? params.plan === 'pro'
+              ? 'subscription.activated'
+              : 'transaction.completed'
+            : params.plan === 'pro'
+            ? 'checkout.session.completed'
+            : 'token_pack.purchased',
         plan_granted: params.plan,
-        amount_cents: params.plan === 'pro' ? 1900 : 500,
+        amount_cents: params.plan === 'pro' ? 2900 : 500,
         created_at: new Date().toISOString(),
       });
       return {
@@ -733,8 +754,8 @@ export async function completeSandboxCheckout(params: {
         quota: syncMockQuotaFlags(),
         message:
           params.plan === 'pro'
-            ? 'Upgraded to DocuCleanse Pro ($19/mo).'
-            : 'Added 15 Pro-grade tokens ($5 Token Pack).',
+            ? `Upgraded to DocuCleanse Pro ($29/mo) via ${params.provider === 'paddle' ? 'Paddle' : 'Stripe'}.`
+            : `Added 15 Pro-grade tokens ($5 Token Pack) via ${params.provider === 'paddle' ? 'Paddle' : 'Stripe'}.`,
       };
     }
     throw err;
@@ -784,11 +805,11 @@ export async function setDemoQuotaMode(
 }
 
 export async function dispatchTestWebhook(
-  provider: 'stripe' | 'lemonsqueezy',
+  provider: 'stripe' | 'paddle',
   payload: unknown
-): Promise<{ received: boolean; provider: string; quota: QuotaSnapshot }> {
+): Promise<{ received: boolean; provider: string; processedEvent?: string; quota: QuotaSnapshot }> {
   const endpoint =
-    provider === 'stripe' ? '/api/billing/webhook/stripe' : '/api/billing/webhook/lemonsqueezy';
+    provider === 'stripe' ? '/api/billing/webhook/stripe' : '/api/billing/webhook/paddle';
 
   try {
     const res = await fetch(endpoint, {
@@ -799,18 +820,49 @@ export async function dispatchTestWebhook(
     return await parseJsonResponse<{
       received: boolean;
       provider: string;
+      processedEvent?: string;
       quota: QuotaSnapshot;
     }>(res);
   } catch (err) {
     if (shouldUseMockFallback(err)) {
       const p = payload as {
-        data?: { object?: { metadata?: { tier?: 'pro' | 'token_pack' } } };
-        meta?: { custom_data?: { tier?: 'pro' | 'token_pack' } };
+        event_type?: string;
+        data?: {
+          custom_data?: { plan?: 'pro' | 'token_pack'; tier?: 'pro' | 'token_pack' };
+          object?: { metadata?: { tier?: 'pro' | 'token_pack' } };
+        };
       };
+
+      if (provider === 'paddle' && p?.event_type === 'subscription.canceled') {
+        mockState.quota.plan = mockState.quota.tokenBalance > 0 ? 'token_pack' : 'free';
+        mockState.billingEvents.unshift({
+          id: `evt_local_${Date.now()}`,
+          provider: 'paddle',
+          event_type: 'subscription.canceled',
+          plan_granted: 'free',
+          amount_cents: 0,
+          created_at: new Date().toISOString(),
+        });
+        return {
+          received: true,
+          provider,
+          processedEvent: 'subscription.canceled',
+          quota: syncMockQuotaFlags(),
+        };
+      }
+
       const tier =
-        p?.data?.object?.metadata?.tier || p?.meta?.custom_data?.tier || 'pro';
+        p?.data?.custom_data?.plan ||
+        p?.data?.custom_data?.tier ||
+        p?.data?.object?.metadata?.tier ||
+        'pro';
       const result = await completeSandboxCheckout({ plan: tier, provider });
-      return { received: true, provider, quota: result.quota };
+      return {
+        received: true,
+        provider,
+        processedEvent: p?.event_type,
+        quota: result.quota,
+      };
     }
     throw err;
   }

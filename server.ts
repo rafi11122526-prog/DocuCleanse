@@ -38,14 +38,18 @@ const PORT = Number(process.env.PORT) || 3000;
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 15 * 1024 * 1024, // 15MB max upload
+    fileSize: 200 * 1024 * 1024, // 200MB max upload
   },
 });
 
 async function startServer() {
   const app = express();
 
-  app.use(express.json({ limit: '5mb' }));
+  // Paddle webhook requires the raw request body for HMAC SHA-256 signature verification
+  app.use('/api/billing/webhook/paddle', express.raw({ type: 'application/json', limit: '2mb' }));
+
+  app.use(express.json({ limit: '200mb' }));
+  app.use(express.urlencoded({ limit: '200mb', extended: true }));
 
   // CORS middleware for local dev, Vite proxy, and preview containers
   app.use('/api', (req, res, next) => {
@@ -53,7 +57,7 @@ async function startServer() {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, x-user-id, stripe-signature, x-signature'
+      'Content-Type, Authorization, x-user-id, stripe-signature, paddle-signature'
     );
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Type');
     if (req.method === 'OPTIONS') {

@@ -128,13 +128,13 @@ export function getOrCreateUser(userId = 'usr_demo_freelancer'): UserRecord {
   const safeId = userId.trim() || 'usr_demo_freelancer';
   const defaultEmail =
     safeId === 'usr_demo_freelancer'
-      ? 'alex.morgan@studio-ledger.io'
+      ? 'ru2275353@gmail.com'
       : `${safeId.replace(/[^a-zA-Z0-9_.-]/g, '_')}@docucleanse.local`;
 
   db.prepare(
     `INSERT INTO users (id, email, name, plan, token_balance, created_at, updated_at)
      VALUES (?, ?, ?, 'free', 0, ?, ?)`
-  ).run(safeId, defaultEmail, 'Alex Morgan', now, now);
+  ).run(safeId, defaultEmail, 'Rafi Digital Studio', now, now);
 
   const created = db
     .prepare('SELECT * FROM users WHERE id = ?')
@@ -397,7 +397,7 @@ export function getUserUsageLogs(userId: string, limit = 50): UsageLogRecord[] {
 
 export function applyBillingUpgrade(params: {
   userId: string;
-  provider: 'stripe' | 'lemonsqueezy' | 'sandbox';
+  provider: 'stripe' | 'paddle' | 'sandbox';
   eventType: string;
   tier: 'pro' | 'token_pack';
   tokensToAdd?: number;
@@ -437,6 +437,61 @@ export function applyBillingUpgrade(params: {
 
   tx();
   return getUserQuotaSnapshot(params.userId);
+}
+
+export function applySubscriptionCanceled(params: {
+  userId: string;
+  provider: 'stripe' | 'paddle';
+  eventType: string;
+  payload: unknown;
+}): QuotaSnapshot {
+  const tx = db.transaction(() => {
+    const user = getOrCreateUser(params.userId);
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `UPDATE users SET plan = 'free', updated_at = ? WHERE id = ?`
+    ).run(now, user.id);
+
+    db.prepare(
+      `INSERT INTO billing_events (id, user_id, provider, event_type, plan_granted, amount_cents, payload_json, created_at)
+       VALUES (?, ?, ?, ?, 'free', 0, ?, ?)`
+    ).run(
+      `evt_${crypto.randomUUID()}`,
+      user.id,
+      params.provider,
+      params.eventType,
+      JSON.stringify(params.payload),
+      now
+    );
+  });
+
+  tx();
+  return getUserQuotaSnapshot(params.userId);
+}
+
+export function recordBillingAuditEvent(params: {
+  userId: string;
+  provider: 'stripe' | 'paddle' | 'sandbox';
+  eventType: string;
+  planGranted: string;
+  amountCents: number;
+  payload: unknown;
+}): void {
+  const user = getOrCreateUser(params.userId);
+  db.prepare(
+    `INSERT INTO billing_events (id, user_id, provider, event_type, plan_granted, amount_cents, payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    `evt_${crypto.randomUUID()}`,
+    user.id,
+    params.provider,
+    params.eventType,
+    params.planGranted,
+    params.amountCents,
+    JSON.stringify(params.payload),
+    new Date().toISOString()
+  );
 }
 
 export function resetAccountToFreeForTesting(userId: string): QuotaSnapshot {

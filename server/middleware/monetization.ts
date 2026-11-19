@@ -52,13 +52,14 @@ export function enforceRowLimit(
   quota: QuotaSnapshot,
   rowCount: number
 ): { allowed: true } | { allowed: false; status: number; payload: Record<string, unknown> } {
+  // Pro subscribers and Token Pack holders bypass the 50-row Free tier cutoff
   const hasPaidAllowance = quota.plan === 'pro' || quota.tokenBalance > 0;
   if (!hasPaidAllowance && rowCount > FREE_MAX_ROWS_PER_FILE) {
     return {
       allowed: false,
       status: 402,
       payload: {
-        error: `This file contains ${rowCount} rows, which exceeds the Free tier cap of ${FREE_MAX_ROWS_PER_FILE} rows per file. Upgrade to Pro ($19/mo) or a $5 Token Pack for unlimited rows.`,
+        error: `This file contains ${rowCount} rows, which exceeds the Free tier cap of ${FREE_MAX_ROWS_PER_FILE} rows per file. Upgrade to Pro ($29/mo) or a $5 Token Pack for unlimited rows.`,
         code: 'ROW_LIMIT_EXCEEDED',
         upgradeRequired: true,
         rowCount,

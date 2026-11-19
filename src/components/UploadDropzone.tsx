@@ -94,9 +94,11 @@ export function UploadDropzone({
               Drop raw spreadsheets, transaction CSVs, or supplier receipts
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Supports .csv, .xlsx, .xls, .pdf, .png, and .jpg up to 15 MB ·{' '}
+              Supports CSV, XLSX, XLS, PDF, PNG, JPG (Large files supported — Unlimited rows for Pro)
+            </p>
+            <p className="text-[11px] text-slate-400 dark:text-slate-500">
               {quota?.plan === 'pro' || (quota?.tokenBalance ?? 0) > 0
-                ? 'Unlimited rows enabled'
+                ? 'Pro / Token Pack active · Unlimited rows & chunked high-capacity processing enabled'
                 : `Free tier: ${Math.max(
                     0,
                     (quota?.freeCleansLimit ?? 3) - (quota?.freeCleansUsedThisMonth ?? 0)

@@ -15,7 +15,6 @@ interface TopBarProps {
 export function TopBar({
   activeTab,
   activeFileName,
-  quota,
   theme,
   onToggleTheme,
   onNewUpload,
@@ -64,8 +63,8 @@ export function TopBar({
       </div>
 
       <div className="flex items-center gap-3 shrink-0">
-        <span className="hidden md:inline text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
-          {quota?.email ?? 'alex.morgan@studio-ledger.io'}
+        <span className="hidden sm:inline text-xs font-medium text-slate-600 dark:text-slate-300 whitespace-nowrap">
+          Rafi Digital Studio
         </span>
 
         <button

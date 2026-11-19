@@ -1,6 +1,11 @@
-import { useState } from 'react';
-import { Check, CreditCard, Loader2, ShieldCheck, X } from 'lucide-react';
-import { completeSandboxCheckout, createCheckoutSession } from '../services/api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { initializePaddle, type Paddle } from '@paddle/paddle-js';
+import { Check, CreditCard, FlaskConical, Loader2, ShieldCheck, X } from 'lucide-react';
+import {
+  completeSandboxCheckout,
+  createCheckoutSession,
+  DEMO_USER_ID,
+} from '../services/api';
 import type { PaywallContext, QuotaSnapshot } from '../types';
 
 interface PaywallModalProps {
@@ -10,16 +15,167 @@ interface PaywallModalProps {
   onUpgradeComplete: (quota: QuotaSnapshot, message: string) => void;
 }
 
+const ACTIVE_PADDLE_PRO_PRICE_ID = 'pri_01m7r5t4g1487ktfj68gzrs431';
+const ACTIVE_PADDLE_TOKEN_PACK_PRICE_ID = 'pri_01m7s0y3v873p7gxwr0v1ggc6c';
+
+function resolveValidPaddlePriceId(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  // Real Paddle Billing price IDs follow ULID format: pri_ + 26 lowercase alphanumeric chars
+  if (trimmed && /^pri_[a-z0-9]{20,}$/.test(trimmed)) {
+    return trimmed;
+  }
+  return fallback;
+}
+
+const PADDLE_CLIENT_TOKEN = (
+  (import.meta.env.VITE_PADDLE_CLIENT_TOKEN as string | undefined) || ''
+).trim();
+
+const PADDLE_PRO_PRICE_ID = resolveValidPaddlePriceId(
+  import.meta.env.VITE_PADDLE_PRO_PRICE_ID as string | undefined,
+  ACTIVE_PADDLE_PRO_PRICE_ID
+);
+const PADDLE_TOKEN_PACK_PRICE_ID = resolveValidPaddlePriceId(
+  import.meta.env.VITE_PADDLE_TOKEN_PACK_PRICE_ID as string | undefined,
+  ACTIVE_PADDLE_TOKEN_PACK_PRICE_ID
+);
+
+function isConfiguredPaddleToken(token: string): boolean {
+  if (!token || /placeholder|your_client_token/i.test(token)) return false;
+  // Paddle Billing client-side tokens begin with "test_" (sandbox) or "live_" (production)
+  return /^(test|live)_[a-zA-Z0-9]{10,}$/.test(token);
+}
+
+// Default strictly to 'sandbox' unless production is explicitly set with a live_ client token
+const PADDLE_ENV: 'sandbox' | 'production' =
+  import.meta.env.VITE_PADDLE_ENV === 'production' && PADDLE_CLIENT_TOKEN.startsWith('live_')
+    ? 'production'
+    : 'sandbox';
+
 export function PaywallModal({
   context,
   quota,
   onClose,
   onUpgradeComplete,
 }: PaywallModalProps) {
+  const hasValidPaddleToken = isConfiguredPaddleToken(PADDLE_CLIENT_TOKEN);
   const [selectedPlan, setSelectedPlan] = useState<'pro' | 'token_pack'>('pro');
-  const [provider, setProvider] = useState<'stripe' | 'lemonsqueezy'>('stripe');
+  const [provider, setProvider] = useState<'paddle' | 'stripe'>('paddle');
+  const [paddle, setPaddle] = useState<Paddle | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [bypassSubmitting, setBypassSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const selectedPlanRef = useRef<'pro' | 'token_pack'>(selectedPlan);
+  selectedPlanRef.current = selectedPlan;
+  const paddleRef = useRef<Paddle | null>(paddle);
+  paddleRef.current = paddle;
+
+  const completeLocalSandbox = useCallback(
+    async (plan: 'pro' | 'token_pack', gateway: 'paddle' | 'stripe', note?: string) => {
+      const data = await completeSandboxCheckout({ plan, provider: gateway });
+      const finalMsg = note
+        ? `${data.message || 'Plan upgraded successfully.'} (${note})`
+        : data.message || 'Plan upgraded successfully.';
+      onUpgradeComplete(data.quota, finalMsg);
+      onClose();
+    },
+    [onUpgradeComplete, onClose]
+  );
+
+  const ensurePaddleInstance = useCallback(async (): Promise<Paddle | null> => {
+    if (paddleRef.current) return paddleRef.current;
+    if (!hasValidPaddleToken) return null;
+
+    try {
+      const instance = await initializePaddle({
+        environment: PADDLE_ENV,
+        token: PADDLE_CLIENT_TOKEN,
+        eventCallback: (event) => {
+          const eventName = String(event.name || '');
+
+          if (eventName === 'checkout.completed') {
+            const eventData = event.data as
+              | { custom_data?: { plan?: 'pro' | 'token_pack' } }
+              | undefined;
+            const completedPlan =
+              eventData?.custom_data?.plan || selectedPlanRef.current;
+
+            void completeLocalSandbox(completedPlan, 'paddle').catch((err) => {
+              console.error('[Paddle Post-Checkout Sync Error]', err);
+            });
+            return;
+          }
+
+          const rawEvent = event as unknown as Record<string, unknown>;
+          const nestedError = rawEvent.error;
+
+          if (
+            eventName === 'checkout.error' ||
+            eventName === 'checkout.failed' ||
+            eventName === 'checkout.payment.error' ||
+            eventName.includes('error') ||
+            Boolean(nestedError) ||
+            Boolean(event.code)
+          ) {
+            const activePriceId =
+              selectedPlanRef.current === 'pro'
+                ? PADDLE_PRO_PRICE_ID
+                : PADDLE_TOKEN_PACK_PRICE_ID;
+
+            console.error('[Paddle Checkout Error]', {
+              eventName,
+              environment: PADDLE_ENV,
+              priceId: activePriceId,
+              error: nestedError,
+              detail: event.detail,
+              code: event.code,
+              payload: event,
+            });
+
+            try {
+              paddleRef.current?.Checkout.close();
+            } catch {
+              // Ignore close errors if overlay already closed
+            }
+
+            const detail =
+              (typeof event.detail === 'string' && event.detail) ||
+              (nestedError && typeof nestedError === 'object' && 'detail' in nestedError
+                ? String((nestedError as { detail?: unknown }).detail || '')
+                : '') ||
+              'Paddle Sandbox Checkout could not open on this domain.';
+
+            setError(
+              `${detail} Check the browser console for the full Paddle error payload, or use "Test / Bypass Upgrade (Sandbox Mock)" below to test Pro immediately.`
+            );
+            setSubmitting(false);
+          }
+        },
+      });
+
+      if (instance) {
+        paddleRef.current = instance;
+        setPaddle(instance);
+        return instance;
+      }
+      return null;
+    } catch (err) {
+      console.error('[Paddle Initialize Error]', {
+        environment: PADDLE_ENV,
+        hasToken: hasValidPaddleToken,
+        error: err,
+      });
+      return null;
+    }
+  }, [hasValidPaddleToken, completeLocalSandbox]);
+
+  useEffect(() => {
+    if (!context.open || paddle || !hasValidPaddleToken) {
+      return;
+    }
+    void ensurePaddleInstance();
+  }, [context.open, paddle, hasValidPaddleToken, ensurePaddleInstance]);
 
   if (!context.open) return null;
 
@@ -27,18 +183,82 @@ export function PaywallModal({
     setSubmitting(true);
     setError(null);
     try {
-      await createCheckoutSession({ plan: selectedPlan, provider });
-      const data = await completeSandboxCheckout({ plan: selectedPlan, provider });
+      const userId = quota?.userId || DEMO_USER_ID;
+      const priceId =
+        selectedPlan === 'pro' ? PADDLE_PRO_PRICE_ID : PADDLE_TOKEN_PACK_PRICE_ID;
 
-      onUpgradeComplete(
-        data.quota,
-        data.message || 'Plan upgraded successfully.'
+      const session = await createCheckoutSession({ plan: selectedPlan, provider });
+      if (session.paddleFallbackReason) {
+        console.error('[Paddle Server Checkout Error]', {
+          environment: PADDLE_ENV,
+          priceId,
+          reason: session.paddleFallbackReason,
+        });
+      }
+
+      if (provider === 'paddle' && hasValidPaddleToken) {
+        const paddleInstance = await ensurePaddleInstance();
+        if (paddleInstance) {
+          const theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+          try {
+            if (session.transactionId) {
+              paddleInstance.Checkout.open({
+                transactionId: session.transactionId,
+                settings: { displayMode: 'overlay', theme },
+              });
+            } else {
+              paddleInstance.Checkout.open({
+                items: [{ priceId, quantity: 1 }],
+                customData: {
+                  userId,
+                  plan: selectedPlan,
+                },
+                settings: { displayMode: 'overlay', theme },
+              });
+            }
+            setSubmitting(false);
+            return;
+          } catch (openErr) {
+            console.error('[Paddle Checkout.open Error]', {
+              environment: PADDLE_ENV,
+              priceId,
+              error: openErr,
+            });
+            setError(
+              'Unable to open Paddle Checkout overlay. See console for details or click "Test / Bypass Upgrade (Sandbox Mock)" below.'
+            );
+            setSubmitting(false);
+            return;
+          }
+        }
+      }
+
+      // Graceful fallback when VITE_PADDLE_CLIENT_TOKEN is not injected or Stripe sandbox is chosen
+      await completeLocalSandbox(
+        selectedPlan,
+        provider,
+        provider === 'paddle' && !hasValidPaddleToken
+          ? 'Sandbox fallback — VITE_PADDLE_CLIENT_TOKEN not configured'
+          : undefined
       );
-      onClose();
     } catch (err) {
+      console.error('[Paddle Checkout Flow Error]', err);
       setError(err instanceof Error ? err.message : 'Payment processing failed.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleSandboxBypass = async () => {
+    setBypassSubmitting(true);
+    setError(null);
+    try {
+      await completeLocalSandbox(selectedPlan, provider, 'Sandbox Mock Bypass');
+    } catch (err) {
+      console.error('[Sandbox Bypass Error]', err);
+      setError(err instanceof Error ? err.message : 'Sandbox bypass failed.');
+    } finally {
+      setBypassSubmitting(false);
     }
   };
 
@@ -92,7 +312,7 @@ export function PaywallModal({
                   Pro Subscription
                 </span>
                 <span className="font-mono text-lg font-bold tabular-nums text-slate-900 dark:text-slate-100">
-                  $19<span className="text-xs font-normal text-slate-500">/mo</span>
+                  $29<span className="text-xs font-normal text-slate-500">/mo</span>
                 </span>
               </div>
               <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -156,9 +376,26 @@ export function PaywallModal({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 px-4 py-3">
             <div className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
               <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-              <span>Checkout provider (Sandbox webhook connected)</span>
+              <span>
+                {provider === 'paddle'
+                  ? `Paddle Billing (${PADDLE_ENV}) · ${
+                      selectedPlan === 'pro' ? PADDLE_PRO_PRICE_ID : PADDLE_TOKEN_PACK_PRICE_ID
+                    }`
+                  : 'Stripe Checkout (Sandbox webhook connected)'}
+              </span>
             </div>
             <div className="flex items-center gap-1 rounded-md bg-slate-200/70 dark:bg-slate-800 p-0.5 self-start sm:self-center">
+              <button
+                type="button"
+                onClick={() => setProvider('paddle')}
+                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  provider === 'paddle'
+                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                Paddle
+              </button>
               <button
                 type="button"
                 onClick={() => setProvider('stripe')}
@@ -170,17 +407,6 @@ export function PaywallModal({
               >
                 Stripe
               </button>
-              <button
-                type="button"
-                onClick={() => setProvider('lemonsqueezy')}
-                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  provider === 'lemonsqueezy'
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400'
-                }`}
-              >
-                Lemon Squeezy
-              </button>
             </div>
           </div>
 
@@ -190,34 +416,60 @@ export function PaywallModal({
             </div>
           )}
 
-          {/* Footer CTA */}
-          <div className="flex items-center justify-end gap-3 pt-1">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={handleCheckout}
-              className="flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2 text-xs font-semibold text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0 disabled:opacity-60"
-            >
-              {submitting ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <CreditCard className="h-3.5 w-3.5" />
-              )}
-              <span>
-                {submitting
-                  ? 'Completing Checkout...'
-                  : selectedPlan === 'pro'
-                  ? `Activate Pro ($19/mo) via ${provider === 'stripe' ? 'Stripe' : 'Lemon Squeezy'}`
-                  : `Buy 15 Tokens ($5) via ${provider === 'stripe' ? 'Stripe' : 'Lemon Squeezy'}`}
+          {/* Footer CTA & Sandbox Mock Bypass */}
+          <div className="space-y-3 pt-1">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                Instantaneous digital delivery · 14-day money-back guarantee
               </span>
-            </button>
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting || bypassSubmitting}
+                  onClick={handleCheckout}
+                  className="flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2 text-xs font-semibold text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0 disabled:opacity-60"
+                >
+                  {submitting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <CreditCard className="h-3.5 w-3.5" />
+                  )}
+                  <span>
+                    {submitting
+                      ? 'Opening Checkout...'
+                      : selectedPlan === 'pro'
+                      ? `Activate Pro ($29/mo) via ${provider === 'paddle' ? 'Paddle' : 'Stripe'}`
+                      : `Buy 15 Tokens ($5) via ${provider === 'paddle' ? 'Paddle' : 'Stripe'}`}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 border-t border-slate-200 dark:border-slate-800 pt-3">
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                Testing locally or Paddle overlay blocked on preview domain?
+              </span>
+              <button
+                type="button"
+                disabled={submitting || bypassSubmitting}
+                onClick={handleSandboxBypass}
+                className="flex items-center gap-1.5 rounded-lg border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 px-3.5 py-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition-colors whitespace-nowrap shrink-0 disabled:opacity-60"
+              >
+                {bypassSubmitting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <FlaskConical className="h-3.5 w-3.5" />
+                )}
+                <span>Test / Bypass Upgrade (Sandbox Mock)</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
