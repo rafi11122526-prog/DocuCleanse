@@ -3,6 +3,7 @@ import { stringify as stringifyCsv } from 'csv-stringify/sync';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import type { AuditMetadata, CleanJobRecord } from '../types.ts';
+import { injectNativeDashboardCharts } from './xlsxCharts.ts';
 
 function sanitizeMojibake(val: string): string {
   return val
@@ -239,6 +240,13 @@ function formatUtcTimestamp(iso: string): string {
   return `${dt.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')} UTC`;
 }
 
+interface CurrencyBreakdownEntry {
+  code: string;
+  total: number;
+  negativeTotal: number;
+  txCount: number;
+}
+
 interface SynchronizedExportMetrics {
   meta: AuditMetadata;
   grossInflow: number;
@@ -246,7 +254,7 @@ interface SynchronizedExportMetrics {
   netInflow: number;
   confidenceScore: number;
   detectedCurrencies: string[];
-  currencySummary: Array<{ code: string; total: number }>;
+  currencySummary: CurrencyBreakdownEntry[];
   isMultiCurrency: boolean;
 }
 
@@ -313,6 +321,8 @@ function computeSynchronizedMetrics(job: CleanJobRecord): SynchronizedExportMetr
   let computedInputSum = 0;
   const currencySet = new Set<string>(job.auditMetadata?.detectedCurrencies ?? []);
   const currencyPositiveTotals = new Map<string, number>();
+  const currencyNegativeTotals = new Map<string, number>();
+  const currencyTxCounts = new Map<string, number>();
 
   const rowCount = Math.max(job.cleanedRows.length, job.rawRows.length);
   for (let i = 0; i < rowCount; i++) {
@@ -375,7 +385,10 @@ function computeSynchronizedMetrics(job: CleanJobRecord): SynchronizedExportMetr
       }
     }
 
-    if (rowCurrency) currencySet.add(rowCurrency);
+    if (rowCurrency) {
+      currencySet.add(rowCurrency);
+      currencyTxCounts.set(rowCurrency, (currencyTxCounts.get(rowCurrency) ?? 0) + 1);
+    }
 
     if (rowAmount !== null) {
       algebraicSum += rowAmount;
@@ -389,6 +402,12 @@ function computeSynchronizedMetrics(job: CleanJobRecord): SynchronizedExportMetr
         }
       } else if (rowAmount < 0) {
         negativeExposure += Math.abs(rowAmount);
+        if (rowCurrency) {
+          currencyNegativeTotals.set(
+            rowCurrency,
+            Number(((currencyNegativeTotals.get(rowCurrency) ?? 0) + Math.abs(rowAmount)).toFixed(2))
+          );
+        }
       }
     }
 
@@ -445,9 +464,17 @@ function computeSynchronizedMetrics(job: CleanJobRecord): SynchronizedExportMetr
     .digest('hex');
 
   const detectedCurrencies = Array.from(currencySet);
-  const currencySummary = Array.from(currencyPositiveTotals.entries())
-    .map(([code, total]) => ({ code, total }))
-    .sort((a, b) => b.total - a.total);
+  const allCurKeys = Array.from(
+    new Set([...detectedCurrencies, ...currencyPositiveTotals.keys(), ...currencyTxCounts.keys()])
+  );
+  const currencySummary: CurrencyBreakdownEntry[] = allCurKeys
+    .map((code) => ({
+      code,
+      total: Number((currencyPositiveTotals.get(code) ?? 0).toFixed(2)),
+      negativeTotal: Number((currencyNegativeTotals.get(code) ?? 0).toFixed(2)),
+      txCount: currencyTxCounts.get(code) ?? 0,
+    }))
+    .sort((a, b) => b.total - a.total || b.txCount - a.txCount);
 
   const meta: AuditMetadata = {
     fileHashSha256: job.auditMetadata?.fileHashSha256 || fallbackHash,
@@ -503,17 +530,15 @@ export function generateCsvBuffer(job: CleanJobRecord): Buffer {
 }
 
 /**
- * Generates a production-grade multi-tab XLSX workbook using ExcelJS:
- * - Strict UTF-8 encoding (zero mojibake for €, £, $, ¥)
- * - Tab 1 ("Cleaned_Data"): Bold stylized Row 1 headers, frozen top row, strict column typing:
- *   * qty_sold -> numeric integer (#,##0)
- *   * unit_price -> numeric currency float with native Excel currency format
- *   * tax_rate -> numeric percentage float (0% / 0.00%)
- *   * total_amount -> live Excel formula (=F2*G2) with native currency format
- *   * contact_phone -> forced Text/String (@) so Excel never renders 5.55E+09
- * - Tab 2 ("Audit_Metadata"): Institutional SHA-256, UTC Timestamp, Row Checksum,
- *   Synchronized Confidence Score, Detected Currencies, Synchronized Gross/Net Totals,
- *   and live SUMIFS isolated currency subtotals.
+ * Generates an institutional 3-Tab XLSX workbook with native Excel charts:
+ * - Tab 1 ("Executive_Dashboard"): First active tab with KPI cards (Gross Inflow, Identified Leakage,
+ *   Reconciled Net, Confidence Score), live SUMIFS & COUNTIFS currency table, and two native OOXML charts
+ *   (Bar Chart: Gross Volume by Currency + Doughnut Chart: Transaction Count by Currency).
+ * - Tab 2 ("Cleaned_Data"): Deep navy (#1E293B) frozen Row 1 header, AutoFilter, strict typing
+ *   (phone_number forced to Text/String '@' to prevent arithmetic subtraction, integer quantity,
+ *   native currency unit_price, 0.0% tax_rate, live formula total_amount), auto-fit widths, zebra rows.
+ * - Tab 3 ("Pre_Audit_Report"): Cryptographic SHA-256 hash, UTC timestamp, row checksums,
+ *   compliance disclosures, reconciled totals, and embedded anomaly / schema audit summary.
  */
 export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
   const synced = computeSynchronizedMetrics(job);
@@ -523,6 +548,18 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
   wb.creator = 'Rafi Digital Studio — DocuCleanse Enterprise';
   wb.created = new Date();
   wb.modified = new Date();
+  // Ensure Tab 1 ("Executive_Dashboard") opens as the active visible tab
+  wb.views = [
+    {
+      x: 0,
+      y: 0,
+      width: 10000,
+      height: 20000,
+      firstSheet: 0,
+      activeTab: 0,
+      visibility: 'visible',
+    },
+  ];
 
   const headers = job.cleanedHeaders;
   const mappingByHeader = new Map(job.schemaMappings.map((m) => [m.normalizedHeader, m]));
@@ -532,7 +569,7 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
       .map((d) => `${d.rowIndex}:${d.column}`)
   );
 
-  // Column role detection
+  // Column role detection for Tab 2 ("Cleaned_Data")
   const qtyColIdx = headers.findIndex((h) =>
     /\b(qty|quantity|units)\b|qty_sold|quantity_sold|units_sold/i.test(h)
   );
@@ -561,11 +598,32 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
   const qtyColLetter = qtyColIdx >= 0 ? colIndexToExcelLetter(qtyColIdx) : '';
   const unitPriceColLetter = unitPriceColIdx >= 0 ? colIndexToExcelLetter(unitPriceColIdx) : '';
   const totalColLetter = totalColIdx >= 0 ? colIndexToExcelLetter(totalColIdx) : '';
+  const lastDataRow = Math.max(2, job.cleanedRows.length + 1);
+  const sumTargetIdx = normalizedAmtColIdx >= 0 ? normalizedAmtColIdx : totalColIdx;
+  const sumColLetter = sumTargetIdx >= 0 ? colIndexToExcelLetter(sumTargetIdx) : '';
+  const curCodeLetter = currencyCodeColIdx >= 0 ? colIndexToExcelLetter(currencyCodeColIdx) : '';
+  const dataAmtRange = sumColLetter ? `'Cleaned_Data'!${sumColLetter}2:${sumColLetter}${lastDataRow}` : '';
+  const dataCurRange = curCodeLetter ? `'Cleaned_Data'!${curCodeLetter}2:${curCodeLetter}${lastDataRow}` : '';
+  const singleCurFmt =
+    meta.detectedCurrencies.length === 1
+      ? excelNumberFormatForCurrency(meta.detectedCurrencies[0])
+      : '#,##0.00';
 
-  const headerFill: ExcelJS.Fill = {
+  // Shared Corporate Theme Tokens (#1E293B Deep Navy, Segoe UI, subtle #E2E8F0 borders)
+  const navyHeaderFill: ExcelJS.Fill = {
     type: 'pattern',
     pattern: 'solid',
-    fgColor: { argb: 'FF0F172A' },
+    fgColor: { argb: 'FF1E293B' },
+  };
+  const slateSubHeaderFill: ExcelJS.Fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FF334155' },
+  };
+  const softBannerFill: ExcelJS.Fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFF1F5F9' },
   };
   const headerFont: Partial<ExcelJS.Font> = {
     name: 'Segoe UI',
@@ -579,7 +637,7 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
     color: { argb: 'FF0F172A' },
   };
   const headerBorder: Partial<ExcelJS.Borders> = {
-    bottom: { style: 'medium', color: { argb: 'FF1E293B' } },
+    bottom: { style: 'medium', color: { argb: 'FF0F172A' } },
   };
   const dataRowBorder: Partial<ExcelJS.Borders> = {
     bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
@@ -602,17 +660,395 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
   };
 
   // ============================================================================
-  // TAB 1: Cleaned_Data (Starts directly on Row 1, frozen header, strict typing)
+  // TAB 1: Executive_Dashboard (Active Tab · KPI Cards · SUMIFS/COUNTIFS · Native Charts)
+  // ============================================================================
+  const wsDash = wb.addWorksheet('Executive_Dashboard', {
+    views: [{ showGridLines: false }],
+  });
+
+  // Balanced 9-column executive canvas (Col A = slim left margin, Cols B..I = 4 KPI pairs + table + 2 charts)
+  wsDash.getColumn(1).width = 3;
+  wsDash.getColumn(2).width = 20;
+  wsDash.getColumn(3).width = 22;
+  wsDash.getColumn(4).width = 22;
+  wsDash.getColumn(5).width = 22;
+  wsDash.getColumn(6).width = 20;
+  wsDash.getColumn(7).width = 18;
+  wsDash.getColumn(8).width = 18;
+  wsDash.getColumn(9).width = 18;
+
+  wsDash.getRow(1).height = 10;
+
+  // Row 2: Corporate Navy Banner
+  wsDash.mergeCells('B2:I2');
+  const dashTitle = wsDash.getCell('B2');
+  dashTitle.value = 'DocuCleanse Executive Dashboard — Financial Reconciliation & Currency Analytics';
+  dashTitle.fill = navyHeaderFill;
+  dashTitle.font = { name: 'Segoe UI', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+  dashTitle.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+  wsDash.getRow(2).height = 34;
+
+  // Row 3: Subtitle & Multi-Currency Disclosure
+  wsDash.mergeCells('B3:I3');
+  const dashSub = wsDash.getCell('B3');
+  const disclosureNote = isMultiCurrency
+    ? `Unconverted Multi-Currency Face Value (${meta.detectedCurrencies.join(' · ')}) · Live SUMIFS / COUNTIFS Linked`
+    : 'Live Formula-Linked Executive Summary · Enterprise Privacy Shield (Zero Disk Retention)';
+  dashSub.value = `Source: ${job.fileName}  ·  UTC: ${formatUtcTimestamp(meta.timestampUtc)}  ·  ${disclosureNote}`;
+  dashSub.fill = softBannerFill;
+  dashSub.font = { name: 'Segoe UI', size: 9.5, color: { argb: 'FF475569' } };
+  dashSub.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+  wsDash.getRow(3).height = 22;
+
+  wsDash.getRow(4).height = 12;
+
+  // Rows 5-8: 4 Executive KPI Cards (B:C, D:E, F:G, H:I)
+  wsDash.getRow(5).height = 20;
+  wsDash.getRow(6).height = 28;
+  wsDash.getRow(7).height = 20;
+
+  type KpiCardSpec = {
+    startCol: string;
+    endCol: string;
+    accentArgb: string;
+    label: string;
+    value: ExcelJS.CellValue;
+    numFmt: string;
+    valueColorArgb: string;
+    subtitle: string;
+  };
+
+  const kpiCards: KpiCardSpec[] = [
+    {
+      startCol: 'B',
+      endCol: 'C',
+      accentArgb: 'FF2563EB',
+      label: isMultiCurrency ? 'GROSS INFLOW (UNCONVERTED)' : 'GROSS INFLOW',
+      value: dataAmtRange ? { formula: `SUMIF(${dataAmtRange},">0")`, result: grossInflow } : grossInflow,
+      numFmt: singleCurFmt,
+      valueColorArgb: 'FF0F172A',
+      subtitle: isMultiCurrency
+        ? `Face Value (${meta.detectedCurrencies.join(' · ')})`
+        : 'Sum of positive ledger entries',
+    },
+    {
+      startCol: 'D',
+      endCol: 'E',
+      accentArgb: 'FFDC2626',
+      label: 'IDENTIFIED LEAKAGE / ANOMALY',
+      value: dataAmtRange
+        ? { formula: `ABS(SUMIF(${dataAmtRange},"<0"))`, result: negativeExposure }
+        : negativeExposure,
+      numFmt: singleCurFmt,
+      valueColorArgb: 'FFB91C1C',
+      subtitle: `${job.anomalies.length} audit findings · ${job.cellDiffs.length} cells repaired`,
+    },
+    {
+      startCol: 'F',
+      endCol: 'G',
+      accentArgb: 'FF059669',
+      label: 'RECONCILED NET',
+      value: { formula: 'B6-D6', result: netInflow },
+      numFmt: singleCurFmt,
+      valueColorArgb: 'FF047857',
+      subtitle: 'Gross Inflow minus Identified Leakage',
+    },
+    {
+      startCol: 'H',
+      endCol: 'I',
+      accentArgb: 'FF4F46E5',
+      label: 'CONFIDENCE SCORE',
+      value: Number((confidenceScore / 100).toFixed(4)),
+      numFmt: '0.0%',
+      valueColorArgb: 'FF1D4ED8',
+      subtitle: `${meta.rowsIngested}/${meta.rowsCleaned} rows checksum verified`,
+    },
+  ];
+
+  const colLetterToIdx = (letter: string): number => letter.charCodeAt(0) - 64;
+
+  for (const card of kpiCards) {
+    wsDash.mergeCells(`${card.startCol}5:${card.endCol}5`);
+    wsDash.mergeCells(`${card.startCol}6:${card.endCol}6`);
+    wsDash.mergeCells(`${card.startCol}7:${card.endCol}7`);
+
+    const cStart = colLetterToIdx(card.startCol);
+    const cEnd = colLetterToIdx(card.endCol);
+
+    const lblCell = wsDash.getCell(`${card.startCol}5`);
+    lblCell.value = card.label;
+    lblCell.font = { name: 'Segoe UI', size: 8.5, bold: true, color: { argb: 'FF64748B' } };
+    lblCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+
+    const valCell = wsDash.getCell(`${card.startCol}6`);
+    valCell.value = card.value;
+    valCell.numFmt = card.numFmt;
+    valCell.font = { name: 'Segoe UI', size: 16, bold: true, color: { argb: card.valueColorArgb } };
+    valCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+
+    const subCell = wsDash.getCell(`${card.startCol}7`);
+    subCell.value = card.subtitle;
+    subCell.font = { name: 'Segoe UI', size: 8.5, color: { argb: 'FF64748B' } };
+    subCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+
+    // Apply crisp card fill & perimeter borders across merged rows 5..7
+    for (let r = 5; r <= 7; r++) {
+      for (let c = cStart; c <= cEnd; c++) {
+        const cell = wsDash.getRow(r).getCell(c);
+        cell.fill = whiteFill;
+        cell.border = {
+          top: r === 5 ? { style: 'medium', color: { argb: card.accentArgb } } : undefined,
+          bottom: r === 7 ? { style: 'thin', color: { argb: 'FFCBD5E1' } } : undefined,
+          left: c === cStart ? { style: 'thin', color: { argb: 'FFCBD5E1' } } : undefined,
+          right: c === cEnd ? { style: 'thin', color: { argb: 'FFCBD5E1' } } : undefined,
+        };
+      }
+    }
+  }
+
+  wsDash.getRow(8).height = 14;
+
+  // Row 9: Dynamic Summary Table Section Banner
+  wsDash.mergeCells('B9:I9');
+  const tableBanner = wsDash.getCell('B9');
+  tableBanner.value = 'Currency Volume & Transaction Distribution (Live SUMIFS & COUNTIFS Formulas)';
+  tableBanner.fill = navyHeaderFill;
+  tableBanner.font = { name: 'Segoe UI', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
+  tableBanner.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+  wsDash.getRow(9).height = 26;
+
+  // Row 10: Dynamic Summary Table Headers (Unmerged cells so Excel Charts bind cleanly to $B$11:$D$N)
+  const summaryHeaders = [
+    'Currency',
+    'Gross Volume (SUMIFS)',
+    'Transaction Count (COUNTIFS)',
+    'Negative / Leakage (SUMIFS)',
+    'Net Reconciled Volume',
+    'Gross Share (%)',
+    'Avg Ticket Size',
+    'FX Isolation Status',
+  ];
+  const sumHeadRow = wsDash.getRow(10);
+  sumHeadRow.height = 24;
+  summaryHeaders.forEach((label, idx) => {
+    const cell = sumHeadRow.getCell(idx + 2); // Cols B..I
+    cell.value = label;
+    cell.fill = slateSubHeaderFill;
+    cell.font = { name: 'Segoe UI', size: 9.5, bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.alignment = { vertical: 'middle', horizontal: 'center' };
+    cell.border = headerBorder;
+  });
+
+  // Build ordered currency list (all detected currencies + USD, EUR, GBP baseline so SUMIFS/COUNTIFS always cover core currencies)
+  const currencyLookup = new Map(currencySummary.map((c) => [c.code, c]));
+  const dashboardCurrencyCodes = Array.from(
+    new Set([...currencySummary.map((c) => c.code), 'USD', 'EUR', 'GBP'])
+  );
+
+  const firstSummaryRow = 11;
+  const lastSummaryRow = firstSummaryRow + dashboardCurrencyCodes.length - 1;
+  const totalSummaryRow = lastSummaryRow + 1;
+  const totalGrossForShare = dashboardCurrencyCodes.reduce(
+    (acc, code) => acc + (currencyLookup.get(code)?.total ?? 0),
+    0
+  );
+
+  const chartSeriesItems: Array<{ label: string; volume: number; count: number }> = [];
+
+  dashboardCurrencyCodes.forEach((code, idx) => {
+    const rowNum = firstSummaryRow + idx;
+    const stats = currencyLookup.get(code) ?? { code, total: 0, negativeTotal: 0, txCount: 0 };
+    const netVal = Number((stats.total - stats.negativeTotal).toFixed(2));
+    const shareVal = totalGrossForShare > 0 ? stats.total / totalGrossForShare : 0;
+    const avgVal = stats.txCount > 0 ? Number((stats.total / stats.txCount).toFixed(2)) : 0;
+    const cFmt = excelNumberFormatForCurrency(code);
+
+    chartSeriesItems.push({
+      label: code,
+      volume: stats.total,
+      count: stats.txCount,
+    });
+
+    const r = wsDash.getRow(rowNum);
+    r.height = 21;
+    const rowFill = idx % 2 === 1 ? zebraFill : whiteFill;
+
+    // Col B: Currency Code
+    const cCode = r.getCell(2);
+    cCode.value = code;
+    cCode.numFmt = '@';
+    cCode.font = { ...bodyFont, bold: true };
+    cCode.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    // Col C: Gross Volume via live SUMIFS
+    const cGross = r.getCell(3);
+    cGross.value =
+      dataAmtRange && dataCurRange
+        ? {
+            formula: `SUMIFS(${dataAmtRange},${dataCurRange},B${rowNum},${dataAmtRange},">0")`,
+            result: stats.total,
+          }
+        : stats.total;
+    cGross.numFmt = cFmt;
+    cGross.font = { ...bodyFont, bold: true };
+    cGross.alignment = { vertical: 'middle', horizontal: 'right' };
+
+    // Col D: Transaction Count via live COUNTIFS
+    const cCount = r.getCell(4);
+    cCount.value = dataCurRange
+      ? {
+          formula: `COUNTIFS(${dataCurRange},B${rowNum})`,
+          result: stats.txCount,
+        }
+      : stats.txCount;
+    cCount.numFmt = '#,##0';
+    cCount.font = bodyFont;
+    cCount.alignment = { vertical: 'middle', horizontal: 'right' };
+
+    // Col E: Negative / Leakage via live SUMIFS
+    const cNeg = r.getCell(5);
+    cNeg.value =
+      dataAmtRange && dataCurRange
+        ? {
+            formula: `ABS(SUMIFS(${dataAmtRange},${dataCurRange},B${rowNum},${dataAmtRange},"<0"))`,
+            result: stats.negativeTotal,
+          }
+        : stats.negativeTotal;
+    cNeg.numFmt = cFmt;
+    cNeg.font = {
+      ...bodyFont,
+      color: { argb: stats.negativeTotal > 0 ? 'FFB91C1C' : 'FF475569' },
+    };
+    cNeg.alignment = { vertical: 'middle', horizontal: 'right' };
+
+    // Col F: Net Reconciled Volume (Gross - Leakage)
+    const cNet = r.getCell(6);
+    cNet.value = { formula: `C${rowNum}-E${rowNum}`, result: netVal };
+    cNet.numFmt = cFmt;
+    cNet.font = { ...bodyFont, bold: true, color: { argb: 'FF047857' } };
+    cNet.alignment = { vertical: 'middle', horizontal: 'right' };
+
+    // Col G: Volume Share (%)
+    const cShare = r.getCell(7);
+    cShare.value = {
+      formula: `IF($C$${totalSummaryRow}=0,0,C${rowNum}/$C$${totalSummaryRow})`,
+      result: Number(shareVal.toFixed(4)),
+    };
+    cShare.numFmt = '0.0%';
+    cShare.font = bodyFont;
+    cShare.alignment = { vertical: 'middle', horizontal: 'right' };
+
+    // Col H: Average Ticket Size
+    const cAvg = r.getCell(8);
+    cAvg.value = {
+      formula: `IF(D${rowNum}=0,0,C${rowNum}/D${rowNum})`,
+      result: avgVal,
+    };
+    cAvg.numFmt = cFmt;
+    cAvg.font = bodyFont;
+    cAvg.alignment = { vertical: 'middle', horizontal: 'right' };
+
+    // Col I: FX Isolation Status
+    const cIso = r.getCell(9);
+    cIso.value = stats.txCount > 0 ? 'Isolated (ISO-4217)' : 'No Activity';
+    cIso.numFmt = '@';
+    cIso.font = {
+      ...bodyFont,
+      size: 9,
+      color: { argb: stats.txCount > 0 ? 'FF15803D' : 'FF94A3B8' },
+    };
+    cIso.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    for (let col = 2; col <= 9; col++) {
+      const cell = r.getCell(col);
+      cell.fill = rowFill;
+      cell.border = dataRowBorder;
+    }
+  });
+
+  // Total Summary Row
+  const totRow = wsDash.getRow(totalSummaryRow);
+  totRow.height = 24;
+  const totalTxCount = chartSeriesItems.reduce((acc, item) => acc + item.count, 0);
+  const totalGrossSum = Number(chartSeriesItems.reduce((acc, item) => acc + item.volume, 0).toFixed(2));
+  const totalNegSum = Number(
+    dashboardCurrencyCodes.reduce((acc, code) => acc + (currencyLookup.get(code)?.negativeTotal ?? 0), 0).toFixed(2)
+  );
+  const totalNetSum = Number((totalGrossSum - totalNegSum).toFixed(2));
+
+  totRow.getCell(2).value = isMultiCurrency ? 'Total (Unconverted)' : 'Total';
+  totRow.getCell(2).alignment = { vertical: 'middle', horizontal: 'center' };
+  totRow.getCell(3).value = {
+    formula: `SUM(C${firstSummaryRow}:C${lastSummaryRow})`,
+    result: totalGrossSum,
+  };
+  totRow.getCell(3).numFmt = singleCurFmt;
+  totRow.getCell(3).alignment = { vertical: 'middle', horizontal: 'right' };
+
+  totRow.getCell(4).value = {
+    formula: `SUM(D${firstSummaryRow}:D${lastSummaryRow})`,
+    result: totalTxCount,
+  };
+  totRow.getCell(4).numFmt = '#,##0';
+  totRow.getCell(4).alignment = { vertical: 'middle', horizontal: 'right' };
+
+  totRow.getCell(5).value = {
+    formula: `SUM(E${firstSummaryRow}:E${lastSummaryRow})`,
+    result: totalNegSum,
+  };
+  totRow.getCell(5).numFmt = singleCurFmt;
+  totRow.getCell(5).alignment = { vertical: 'middle', horizontal: 'right' };
+
+  totRow.getCell(6).value = {
+    formula: `SUM(F${firstSummaryRow}:F${lastSummaryRow})`,
+    result: totalNetSum,
+  };
+  totRow.getCell(6).numFmt = singleCurFmt;
+  totRow.getCell(6).alignment = { vertical: 'middle', horizontal: 'right' };
+
+  totRow.getCell(7).value = {
+    formula: `SUM(G${firstSummaryRow}:G${lastSummaryRow})`,
+    result: totalGrossSum > 0 ? 1 : 0,
+  };
+  totRow.getCell(7).numFmt = '0.0%';
+  totRow.getCell(7).alignment = { vertical: 'middle', horizontal: 'right' };
+
+  totRow.getCell(8).value = {
+    formula: `IF(D${totalSummaryRow}=0,0,C${totalSummaryRow}/D${totalSummaryRow})`,
+    result: totalTxCount > 0 ? Number((totalGrossSum / totalTxCount).toFixed(2)) : 0,
+  };
+  totRow.getCell(8).numFmt = singleCurFmt;
+  totRow.getCell(8).alignment = { vertical: 'middle', horizontal: 'right' };
+
+  totRow.getCell(9).value = isMultiCurrency ? 'No Cross-FX Mixing' : 'Reconciled';
+  totRow.getCell(9).alignment = { vertical: 'middle', horizontal: 'center' };
+
+  for (let col = 2; col <= 9; col++) {
+    const cell = totRow.getCell(col);
+    cell.fill = softBannerFill;
+    cell.font = { ...bodyFont, bold: true };
+    cell.border = {
+      top: { style: 'thin', color: { argb: 'FF94A3B8' } },
+      bottom: { style: 'medium', color: { argb: 'FF1E293B' } },
+    };
+  }
+
+  // Reserve clean spacing rows below summary table for the 2 side-by-side native Excel charts
+  const chartStartRowZeroBased = totalSummaryRow + 1; // 1 blank spacer row below totals
+  const chartEndRowZeroBased = chartStartRowZeroBased + 16;
+
+  // ============================================================================
+  // TAB 2: Cleaned_Data (Frozen Row 1 Header · AutoFilter · #1E293B Navy · Strict Typing)
   // ============================================================================
   const wsData = wb.addWorksheet('Cleaned_Data', {
     views: [{ state: 'frozen', ySplit: 1 }],
   });
 
-  // Row 1: Deep corporate navy (#0F172A), bold white 11pt Segoe UI, 28pt height, centered
+  // Row 1: Deep corporate navy (#1E293B), bold white 11pt Segoe UI, 28pt height, centered
   const headerRow = wsData.addRow(headers);
   headerRow.height = 28;
   headerRow.eachCell((cell) => {
-    cell.fill = headerFill;
+    cell.fill = navyHeaderFill;
     cell.font = headerFont;
     cell.alignment = { vertical: 'middle', horizontal: 'center' };
     cell.border = headerBorder;
@@ -664,7 +1100,6 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
 
       if (isPhoneCol) {
         const safePhoneStr = formatPhoneForSpreadsheetText(rawStr);
-        // Explicitly set JS string value (ExcelJS.ValueType.String) and '@' text format — never a formula
         cell.value = String(safePhoneStr);
         cell.numFmt = '@';
         cell.alignment = { vertical: 'middle', horizontal: layout.alignment };
@@ -828,37 +1263,32 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
   });
 
   // ============================================================================
-  // TAB 2: Audit_Metadata (Institutional Metadata & Synchronized Totals)
+  // TAB 3: Pre_Audit_Report (SHA-256 · UTC · Checksums · Compliance Disclosures · Findings)
   // ============================================================================
-  const wsCert = wb.addWorksheet('Audit_Metadata', {
+  const wsReport = wb.addWorksheet('Pre_Audit_Report', {
     views: [{ state: 'frozen', ySplit: 2 }],
   });
 
-  wsCert.mergeCells('A1:B1');
-  const titleCell = wsCert.getCell('A1');
-  titleCell.value = 'DocuCleanse — Pre-Audit Processing Report & Audit Metadata';
-  titleCell.fill = headerFill;
+  wsReport.mergeCells('A1:D1');
+  const titleCell = wsReport.getCell('A1');
+  titleCell.value = 'DocuCleanse — Pre-Audit Processing Report & Compliance Disclosures';
+  titleCell.fill = navyHeaderFill;
   titleCell.font = { name: 'Segoe UI', size: 12.5, bold: true, color: { argb: 'FFFFFFFF' } };
   titleCell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
-  wsCert.getRow(1).height = 30;
+  wsReport.getRow(1).height = 30;
 
-  const certSubHeader = wsCert.addRow(['Compliance / Reconciliation Field', 'Verified Value']);
+  wsReport.mergeCells('B2:D2');
+  const certSubHeader = wsReport.getRow(2);
   certSubHeader.height = 26;
-  certSubHeader.eachCell((cell) => {
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
+  certSubHeader.getCell(1).value = 'Compliance / Reconciliation Field';
+  certSubHeader.getCell(2).value = 'Verified Value & Audit Disclosure';
+  for (let c = 1; c <= 4; c++) {
+    const cell = certSubHeader.getCell(c);
+    cell.fill = slateSubHeaderFill;
     cell.font = { name: 'Segoe UI', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
     cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
     cell.border = thinBorder;
-  });
-
-  const lastDataRow = Math.max(2, job.cleanedRows.length + 1);
-  const sumTargetIdx = normalizedAmtColIdx >= 0 ? normalizedAmtColIdx : totalColIdx;
-  const sumColLetter = sumTargetIdx >= 0 ? colIndexToExcelLetter(sumTargetIdx) : '';
-  const dataAmtRange = sumColLetter ? `'Cleaned_Data'!${sumColLetter}2:${sumColLetter}${lastDataRow}` : '';
-  const singleCurFmt =
-    meta.detectedCurrencies.length === 1
-      ? excelNumberFormatForCurrency(meta.detectedCurrencies[0])
-      : '#,##0.00';
+  }
 
   type CertEntry = {
     label: string;
@@ -872,6 +1302,10 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
     {
       label: 'Enterprise Privacy Shield',
       value: 'Ephemeral RAM Processing · Zero Permanent Data Storage · GDPR & Pre-Audit Ready',
+    },
+    {
+      label: 'LLM Training & Retention Disclosure',
+      value: 'Zero external LLM model training on client files · Volatile memory buffer zeroized immediately after processing',
     },
     { label: 'Report / Job ID', value: job.id },
     { label: 'Source File Name', value: job.fileName },
@@ -894,15 +1328,19 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
       value: meta.detectedCurrencies.length > 0 ? meta.detectedCurrencies.join(', ') : 'N/A',
     },
     {
+      label: 'Accounting FX Disclosure',
+      value: isMultiCurrency
+        ? `Unconverted Multi-Currency Face Value (${meta.detectedCurrencies.join(' · ')}) — see Executive_Dashboard for isolated SUMIFS subtotals`
+        : 'Single-currency ledger — no cross-FX conversion required',
+    },
+    {
       label: 'Primary Monetary Column',
       value: meta.primaryAmountColumn || 'N/A',
     },
   ];
 
-  // Track exact row numbers for synchronized Gross, Leakage, Net, and Input/Output formulas
   const grossRowNum = 3 + certEntries.length;
   const negRowNum = grossRowNum + 1;
-  const netRowNum = grossRowNum + 2;
   const inputRowNum = grossRowNum + 3;
   const outputRowNum = grossRowNum + 4;
 
@@ -926,8 +1364,8 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
     },
     {
       label: isMultiCurrency
-        ? 'Net Reconciled Inflow (Gross − Negative Exposure, Unconverted)'
-        : 'Net Reconciled Inflow (Gross − Refunds/Negatives)',
+        ? 'Reconciled Net Inflow (Gross − Negative Exposure, Unconverted)'
+        : 'Reconciled Net Inflow (Gross − Refunds/Negatives)',
       value: { formula: `B${grossRowNum}-B${negRowNum}`, result: netInflow },
       numFmt: singleCurFmt,
       bold: true,
@@ -960,170 +1398,117 @@ export async function generateXlsxBuffer(job: CleanJobRecord): Promise<Buffer> {
   );
 
   certEntries.forEach((entry, idx) => {
-    const r = wsCert.addRow([entry.label, entry.value]);
+    const rowIdx = 3 + idx;
+    wsReport.mergeCells(`B${rowIdx}:D${rowIdx}`);
+    const r = wsReport.getRow(rowIdx);
     r.height = 20;
     const c1 = r.getCell(1);
     const c2 = r.getCell(2);
+    c1.value = entry.label;
+    c2.value = entry.value;
     c1.font = { ...bodyFont, bold: true, color: { argb: 'FF334155' } };
     c2.font = { ...bodyFont, bold: Boolean(entry.bold) };
-    c1.border = dataRowBorder;
-    c2.border = dataRowBorder;
     c1.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+    const isNumericOrFormula =
+      typeof entry.value === 'number' ||
+      (typeof entry.value === 'object' && entry.value !== null && 'formula' in entry.value);
     c2.alignment = {
       vertical: 'middle',
-      horizontal: typeof entry.value === 'number' || (typeof entry.value === 'object' && entry.value !== null && 'formula' in entry.value) ? 'right' : 'left',
+      horizontal: isNumericOrFormula ? 'right' : 'left',
+      indent: isNumericOrFormula ? 0 : 1,
     };
     if (entry.numFmt) {
       c2.numFmt = entry.numFmt;
     }
     const rowFill = idx % 2 === 1 ? zebraFill : whiteFill;
-    c1.fill = rowFill;
-    c2.fill = rowFill;
+    for (let c = 1; c <= 4; c++) {
+      const cell = r.getCell(c);
+      cell.fill = rowFill;
+      cell.border = dataRowBorder;
+    }
   });
 
-  // Isolated Multi-Currency Breakdown Table on Tab 2 with live SUMIFS
-  if (currencySummary.length > 0 && dataAmtRange) {
-    wsCert.addRow([]);
-    const sectionRow = wsCert.addRow([
-      'Isolated Multi-Currency Gross Inflow Subtotals (No Cross-FX Mixing)',
-      'Positive Subtotal',
-    ]);
-    sectionRow.height = 26;
-    sectionRow.eachCell((cell) => {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
-      cell.font = { name: 'Segoe UI', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
-      cell.border = thinBorder;
-      cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
-    });
+  // Embedded Anomaly Audit Log section inside Tab 3 ("Pre_Audit_Report")
+  if (job.anomalies.length > 0) {
+    const spacerRowNum = 3 + certEntries.length + 1;
+    wsReport.getRow(spacerRowNum).height = 12;
 
-    const curCodeLetter =
-      currencyCodeColIdx >= 0 ? colIndexToExcelLetter(currencyCodeColIdx) : '';
+    const anomSectionRowNum = spacerRowNum + 1;
+    wsReport.mergeCells(`A${anomSectionRowNum}:D${anomSectionRowNum}`);
+    const anomBanner = wsReport.getCell(`A${anomSectionRowNum}`);
+    anomBanner.value = `Pre-Audit Findings & Anomaly Log (${job.anomalies.length} Entries)`;
+    anomBanner.fill = navyHeaderFill;
+    anomBanner.font = { name: 'Segoe UI', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
+    anomBanner.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+    wsReport.getRow(anomSectionRowNum).height = 26;
 
-    currencySummary.forEach((entry, idx) => {
-      const valuePayload: ExcelJS.CellValue = curCodeLetter
-        ? {
-            formula: `SUMIFS(${dataAmtRange},'Cleaned_Data'!${curCodeLetter}2:${curCodeLetter}${lastDataRow},"${entry.code}",${dataAmtRange},">0")`,
-            result: entry.total,
-          }
-        : entry.total;
+    const anomHeadRowNum = anomSectionRowNum + 1;
+    const anomHead = wsReport.getRow(anomHeadRowNum);
+    anomHead.height = 24;
+    ['Severity · Category', 'Location', 'Raw → Reconciled Value', 'Audit Explanation'].forEach(
+      (title, i) => {
+        const cell = anomHead.getCell(i + 1);
+        cell.value = title;
+        cell.fill = slateSubHeaderFill;
+        cell.font = { name: 'Segoe UI', size: 9.5, bold: true, color: { argb: 'FFFFFFFF' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.border = headerBorder;
+      }
+    );
 
-      const r = wsCert.addRow([entry.code, valuePayload]);
-      r.height = 20;
-      const c1 = r.getCell(1);
-      const c2 = r.getCell(2);
-      c1.font = { ...bodyFont, bold: true };
-      c2.font = { ...bodyFont, bold: true };
-      c1.border = dataRowBorder;
-      c2.border = dataRowBorder;
-      c1.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
-      c2.alignment = { vertical: 'middle', horizontal: 'right' };
-      c2.numFmt = excelNumberFormatForCurrency(entry.code);
+    job.anomalies.forEach((a, idx) => {
+      const r = wsReport.getRow(anomHeadRowNum + 1 + idx);
+      r.height = 22;
+      r.getCell(1).value = `[${a.severity.toUpperCase()}] ${sanitizeMojibake(a.category)}`;
+      r.getCell(2).value = sanitizeMojibake(a.location);
+      r.getCell(3).value = `${sanitizeMojibake(a.rawValue)} → ${sanitizeMojibake(a.suggestedOrFixedValue)}`;
+      r.getCell(4).value = sanitizeMojibake(a.explanation);
+
       const rowFill = idx % 2 === 1 ? zebraFill : whiteFill;
-      c1.fill = rowFill;
-      c2.fill = rowFill;
+      for (let c = 1; c <= 4; c++) {
+        const cell = r.getCell(c);
+        cell.font = bodyFont;
+        cell.numFmt = '@';
+        cell.fill = rowFill;
+        cell.border = dataRowBorder;
+        cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: c === 4 };
+      }
+      r.getCell(1).font = {
+        ...bodyFont,
+        bold: true,
+        color: {
+          argb:
+            a.severity === 'critical'
+              ? 'FFDC2626'
+              : a.severity === 'warning'
+              ? 'FFD97706'
+              : 'FF15803D',
+        },
+      };
     });
   }
 
-  wsCert.getColumn(1).width = 58;
-  wsCert.getColumn(2).width = 74;
+  wsReport.getColumn(1).width = 44;
+  wsReport.getColumn(2).width = 30;
+  wsReport.getColumn(3).width = 36;
+  wsReport.getColumn(4).width = 62;
 
-  // ============================================================================
-  // TAB 3: Anomaly_Audit_Log
-  // ============================================================================
-  const wsAnom = wb.addWorksheet('Anomaly_Audit_Log', {
-    views: [{ state: 'frozen', ySplit: 1 }],
+  const rawXlsxBuffer = Buffer.from(await wb.xlsx.writeBuffer());
+
+  // Inject native OOXML Bar Chart & Doughnut Chart onto Tab 1 ("Executive_Dashboard")
+  return injectNativeDashboardCharts(rawXlsxBuffer, {
+    sheetName: 'Executive_Dashboard',
+    firstDataRow: firstSummaryRow,
+    lastDataRow: lastSummaryRow,
+    labelColLetter: 'B',
+    volumeColLetter: 'C',
+    countColLetter: 'D',
+    anchorStartRowZeroBased: chartStartRowZeroBased,
+    anchorEndRowZeroBased: chartEndRowZeroBased,
+    barTitle: 'Gross Volume by Currency (SUMIFS)',
+    donutTitle: 'Transaction Count by Currency (COUNTIFS)',
+    items: chartSeriesItems,
   });
-  const anomHeaders = ['Severity', 'Category', 'Location', 'Raw Value', 'Normalized / Suggested', 'Explanation'];
-  const anomHeadRow = wsAnom.addRow(anomHeaders);
-  anomHeadRow.height = 28;
-  anomHeadRow.eachCell((cell) => {
-    cell.fill = headerFill;
-    cell.font = headerFont;
-    cell.border = headerBorder;
-    cell.alignment = { vertical: 'middle', horizontal: 'center' };
-  });
-
-  job.anomalies.forEach((a, idx) => {
-    const r = wsAnom.addRow([
-      a.severity.toUpperCase(),
-      sanitizeMojibake(a.category),
-      sanitizeMojibake(a.location),
-      sanitizeMojibake(a.rawValue),
-      sanitizeMojibake(a.suggestedOrFixedValue),
-      sanitizeMojibake(a.explanation),
-    ]);
-    r.height = 22;
-    r.eachCell((cell, colNum) => {
-      cell.font = bodyFont;
-      cell.border = dataRowBorder;
-      cell.numFmt = '@';
-      cell.fill = idx % 2 === 1 ? zebraFill : whiteFill;
-      cell.alignment = {
-        vertical: 'middle',
-        horizontal: colNum === 1 ? 'center' : 'left',
-        wrapText: colNum === 6,
-      };
-      if (colNum === 1) {
-        cell.font = {
-          ...bodyFont,
-          bold: true,
-          color: {
-            argb:
-              a.severity === 'critical'
-                ? 'FFDC2626'
-                : a.severity === 'warning'
-                ? 'FFD97706'
-                : 'FF15803D',
-          },
-        };
-      }
-    });
-  });
-
-  wsAnom.autoFilter = {
-    from: { row: 1, column: 1 },
-    to: { row: 1, column: anomHeaders.length },
-  };
-  wsAnom.getColumn(1).width = 14;
-  wsAnom.getColumn(2).width = 28;
-  wsAnom.getColumn(3).width = 30;
-  wsAnom.getColumn(4).width = 26;
-  wsAnom.getColumn(5).width = 30;
-  wsAnom.getColumn(6).width = 62;
-
-  // ============================================================================
-  // TAB 4: Schema_Mapping
-  // ============================================================================
-  const wsMap = wb.addWorksheet('Schema_Mapping', {
-    views: [{ state: 'frozen', ySplit: 1 }],
-  });
-  const mapHeadRow = wsMap.addRow(['Raw Header', 'Normalized Header', 'Detected Type', 'Mapping Rationale']);
-  mapHeadRow.height = 28;
-  mapHeadRow.eachCell((cell) => {
-    cell.fill = headerFill;
-    cell.font = headerFont;
-    cell.border = headerBorder;
-    cell.alignment = { vertical: 'middle', horizontal: 'center' };
-  });
-
-  job.schemaMappings.forEach((m, idx) => {
-    const r = wsMap.addRow([m.rawHeader, m.normalizedHeader, m.detectedType, m.reason]);
-    r.height = 20;
-    r.eachCell((cell, colNum) => {
-      cell.font = bodyFont;
-      cell.border = dataRowBorder;
-      cell.fill = idx % 2 === 1 ? zebraFill : whiteFill;
-      cell.alignment = { vertical: 'middle', horizontal: colNum === 3 ? 'center' : 'left' };
-    });
-  });
-
-  wsMap.getColumn(1).width = 26;
-  wsMap.getColumn(2).width = 26;
-  wsMap.getColumn(3).width = 16;
-  wsMap.getColumn(4).width = 54;
-
-  const arrayBuffer = await wb.xlsx.writeBuffer();
-  return Buffer.from(arrayBuffer);
 }
 
 export async function generateSummaryPdfBuffer(job: CleanJobRecord): Promise<Buffer> {

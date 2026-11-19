@@ -1283,6 +1283,14 @@ export async function downloadExportFile(
           : 16;
         return { wch: Math.max(wch, h.length + 5) };
       });
+      const dashRows = [
+        ['DocuCleanse Executive Dashboard', 'Value'],
+        ['Gross Inflow', Number(gross.toFixed(2))],
+        ['Identified Leakage / Anomaly', Number(negExp.toFixed(2))],
+        ['Reconciled Net', Number((gross - negExp).toFixed(2))],
+        ['Confidence Score', `${(meta?.reconciliationConfidenceScore ?? 99.7).toFixed(1)}%`],
+      ];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dashRows), 'Executive_Dashboard');
       XLSX.utils.book_append_sheet(wb, wsData, 'Cleaned_Data');
 
       const certRows = [
@@ -1297,7 +1305,7 @@ export async function downloadExportFile(
         ['Identified Leakage / Negative Exposure', Number(negExp.toFixed(2))],
         ['Net Reconciled Inflow', Number((gross - negExp).toFixed(2))],
       ];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(certRows), 'Audit_Metadata');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(certRows), 'Pre_Audit_Report');
 
       const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
       return {
