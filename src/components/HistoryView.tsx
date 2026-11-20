@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
-import { ArrowUpRight, Download, FileSpreadsheet, Search } from 'lucide-react';
+import { ArrowUpRight, Download, FileSpreadsheet, FileText, Lock, Search } from 'lucide-react';
 import type { CleanJob, UsageLog } from '../types';
 
 interface HistoryViewProps {
   jobs: CleanJob[];
   usageLogs: UsageLog[];
+  isPro?: boolean;
   onOpenJob: (job: CleanJob) => void;
   onExport: (jobId: string, format: 'csv' | 'xlsx' | 'pdf') => void;
   onGoToUpload: () => void;
@@ -13,6 +14,7 @@ interface HistoryViewProps {
 export function HistoryView({
   jobs,
   usageLogs,
+  isPro = false,
   onOpenJob,
   onExport,
   onGoToUpload,
@@ -167,6 +169,32 @@ export function HistoryView({
                         >
                           <Download className="h-3 w-3" />
                           <span>CSV</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onExport(job.id, 'xlsx')}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+                          title={isPro ? 'Export XLSX workbook' : 'Upgrade to Pro ($40/mo) to export XLSX'}
+                        >
+                          {isPro ? (
+                            <FileSpreadsheet className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                          ) : (
+                            <Lock className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+                          )}
+                          <span>XLSX</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onExport(job.id, 'pdf')}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap shrink-0"
+                          title={isPro ? 'Export Pre-Audit PDF' : 'Upgrade to Pro ($40/mo) to export Pre-Audit PDF'}
+                        >
+                          {isPro ? (
+                            <FileText className="h-3 w-3 text-blue-600 dark:text-blue-400" />
+                          ) : (
+                            <Lock className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+                          )}
+                          <span>PDF</span>
                         </button>
                       </div>
                     </td>

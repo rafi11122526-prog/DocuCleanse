@@ -9,16 +9,15 @@ import {
   getJobById,
   getOrCreateUser,
   getUserJobs,
-  getUserQuotaSnapshot,
   getUserUsageLogs,
   logExportAction,
-  resetAccountToFreeForTesting,
   saveCleanJob,
 } from './server/db.ts';
 import {
   checkCleanQuota,
   enforceRowLimit,
   requireProExport,
+  resolveAuthoritativeQuota,
   resolveUserId,
   type GuardedRequest,
 } from './server/middleware/monetization.ts';
@@ -83,14 +82,7 @@ async function startServer() {
 
   // Current user quota & usage logs (strictly Free tier unless a verified active Paddle token is supplied)
   app.get('/api/quota', (req, res) => {
-    const userId = resolveUserId(req);
-    getOrCreateUser(userId);
-    const paddleToken = (req.header('x-paddle-subscription-token') || '').trim();
-    const hasVerifiedToken = /^(sub_|txn_)[a-zA-Z0-9_-]{8,}$/.test(paddleToken);
-    let quota = getUserQuotaSnapshot(userId);
-    if (quota.plan === 'pro' && !hasVerifiedToken) {
-      quota = resetAccountToFreeForTesting(userId);
-    }
+    const { userId, quota } = resolveAuthoritativeQuota(req);
     const usageLogs = getUserUsageLogs(userId, 30);
     res.json({ quota, usageLogs });
   });
@@ -121,7 +113,7 @@ async function startServer() {
         let job;
         if (parsed.kind === 'tabular') {
           // Enforce 50-row Free tier limit BEFORE calling Gemini AI
-          const rowCheck = enforceRowLimit(quota, parsed.rows.length);
+          const rowCheck = enforceRowLimit(quota, parsed.rows.length, Boolean(req.isVerifiedPro));
           if (!rowCheck.allowed) {
             res.status(rowCheck.status).json(rowCheck.payload);
             return;
@@ -140,6 +132,11 @@ async function startServer() {
             parsed,
             fileHashSha256,
           });
+          const rowCheck = enforceRowLimit(quota, job.rowCount, Boolean(req.isVerifiedPro));
+          if (!rowCheck.allowed) {
+            res.status(rowCheck.status).json(rowCheck.payload);
+            return;
+          }
         }
 
         saveCleanJob(job);
@@ -204,11 +201,75 @@ async function startServer() {
     res.json({ job });
   });
 
-  // Pre-Audit Processing Report PDF (always downloadable for compliance verification)
-  app.get('/api/export/:jobId/certificate', async (req, res) => {
+  // Direct POST Pro export endpoints strictly guarded by requireProExport (HTTP 402 for Free users)
+  app.post('/api/export/xlsx', requireProExport, async (req: GuardedRequest, res) => {
     try {
-      const userId = resolveUserId(req);
-      getOrCreateUser(userId);
+      const jobId = String((req.body as { jobId?: string } | undefined)?.jobId || '').trim();
+      const job = jobId ? getJobById(jobId) : null;
+      if (!job) {
+        res.status(404).json({ error: 'Clean job not found.' });
+        return;
+      }
+      const baseName = path
+        .basename(job.fileName, path.extname(job.fileName))
+        .replace(/[^a-zA-Z0-9_-]/g, '_');
+      const buffer = await generateXlsxBuffer(job);
+      logExportAction({
+        userId: req.docuUserId!,
+        jobId: job.id,
+        fileName: job.fileName,
+        fileType: job.fileType,
+        rowCount: job.rowCount,
+        action: 'export_xlsx',
+      });
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      );
+      res.setHeader('Content-Disposition', `attachment; filename="${baseName}_cleaned.xlsx"`);
+      res.send(buffer);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'XLSX export failed.';
+      res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/export/pdf', requireProExport, async (req: GuardedRequest, res) => {
+    try {
+      const jobId = String((req.body as { jobId?: string } | undefined)?.jobId || '').trim();
+      const job = jobId ? getJobById(jobId) : null;
+      if (!job) {
+        res.status(404).json({ error: 'Clean job not found.' });
+        return;
+      }
+      const baseName = path
+        .basename(job.fileName, path.extname(job.fileName))
+        .replace(/[^a-zA-Z0-9_-]/g, '_');
+      const buffer = await generateSummaryPdfBuffer(job);
+      logExportAction({
+        userId: req.docuUserId!,
+        jobId: job.id,
+        fileName: job.fileName,
+        fileType: job.fileType,
+        rowCount: job.rowCount,
+        action: 'export_pdf',
+      });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${baseName}_pre_audit_processing_report.pdf"`
+      );
+      res.send(buffer);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'PDF export failed.';
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // Pre-Audit Processing Report PDF (strictly Pro — guarded by requireProExport)
+  app.get('/api/export/:jobId/certificate', requireProExport, async (req: GuardedRequest, res) => {
+    try {
+      const userId = req.docuUserId!;
       const job = getJobById(String(req.params.jobId));
       if (!job) {
         res.status(404).json({ error: 'Clean job not found.' });

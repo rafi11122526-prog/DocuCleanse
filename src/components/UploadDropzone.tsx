@@ -8,6 +8,8 @@ interface UploadDropzoneProps {
   isProcessing: boolean;
   processingFileName: string | null;
   quota: QuotaSnapshot | null;
+  isPro: boolean;
+  onRequireProUpgrade: (reason: string, code?: string) => void;
   compact?: boolean;
 }
 
@@ -17,6 +19,8 @@ export function UploadDropzone({
   isProcessing,
   processingFileName,
   quota,
+  isPro,
+  onRequireProUpgrade,
   compact = false,
 }: UploadDropzoneProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -97,8 +101,8 @@ export function UploadDropzone({
               Supports CSV, XLSX, XLS, PDF, PNG, JPG (Large files supported — Unlimited rows for Pro)
             </p>
             <p className="text-[11px] text-slate-400 dark:text-slate-500">
-              {quota?.plan === 'pro' || (quota?.tokenBalance ?? 0) > 0
-                ? 'Pro / Token Pack active · Unlimited rows & chunked high-capacity processing enabled'
+              {isPro
+                ? 'Pro Subscription active · Unlimited rows & chunked high-capacity processing enabled'
                 : `Free tier: ${Math.max(
                     0,
                     (quota?.freeCleansLimit ?? 3) - (quota?.freeCleansUsedThisMonth ?? 0)
@@ -155,11 +159,28 @@ export function UploadDropzone({
 
           <button
             type="button"
-            onClick={() => onRunSample('oversized')}
+            onClick={() => {
+              if (!isPro) {
+                onRequireProUpgrade(
+                  'Upgrade to Pro ($40/mo) to process ledgers over 50 rows.',
+                  'ROW_LIMIT_EXCEEDED'
+                );
+                return;
+              }
+              onRunSample('oversized');
+            }}
             className="flex items-center gap-1.5 rounded-md border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
-            title="Tests the 50-row Free tier guardrail"
+            title={
+              isPro
+                ? 'Run 65-row institutional ledger sample'
+                : 'Locked on Free tier — Upgrade to Pro ($40/mo) to process ledgers over 50 rows'
+            }
           >
-            <Lock className="h-3.5 w-3.5 text-slate-500 dark:text-slate-400" />
+            <Lock
+              className={`h-3.5 w-3.5 ${
+                isPro ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
+              }`}
+            />
             <span>65-Row Ledger (Guardrail Test)</span>
           </button>
         </div>

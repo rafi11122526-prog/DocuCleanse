@@ -4,12 +4,16 @@ import {
   FREE_MONTHLY_CLEAN_LIMIT,
   getOrCreateUser,
   getUserQuotaSnapshot,
+  resetAccountToFreeForTesting,
 } from '../db.ts';
 import type { QuotaSnapshot } from '../types.ts';
+
+export const VALID_PADDLE_SUBSCRIPTION_TOKEN_RE = /^(sub_|txn_)[a-zA-Z0-9_-]{8,}$/;
 
 export interface GuardedRequest extends Request {
   docuUserId?: string;
   quotaSnapshot?: QuotaSnapshot;
+  isVerifiedPro?: boolean;
 }
 
 export function resolveUserId(req: Request): string {
@@ -18,23 +22,61 @@ export function resolveUserId(req: Request): string {
   return (headerUser || queryUser || 'usr_demo_freelancer').trim();
 }
 
+export function getVerifiedPaddleToken(req: Request): string | null {
+  const rawHeader =
+    req.header('x-paddle-subscription-token') ||
+    req.header('x-paddle-token') ||
+    '';
+  const trimmed = rawHeader.trim();
+  return VALID_PADDLE_SUBSCRIPTION_TOKEN_RE.test(trimmed) ? trimmed : null;
+}
+
+export function hasVerifiedPaddleToken(req: Request): boolean {
+  return getVerifiedPaddleToken(req) !== null;
+}
+
+/**
+ * Resolves the authoritative quota for the request.
+ * Never honors an unverified Pro or token_pack DB state unless an authenticated,
+ * verified Paddle subscription token header is present.
+ */
+export function resolveAuthoritativeQuota(req: Request): {
+  userId: string;
+  quota: QuotaSnapshot;
+  isVerifiedPro: boolean;
+} {
+  const userId = resolveUserId(req);
+  getOrCreateUser(userId);
+  const verifiedToken = hasVerifiedPaddleToken(req);
+  let quota = getUserQuotaSnapshot(userId);
+
+  if ((quota.plan === 'pro' || quota.tokenBalance > 0) && !verifiedToken) {
+    quota = resetAccountToFreeForTesting(userId);
+  }
+
+  const isVerifiedPro = quota.plan === 'pro' && verifiedToken;
+  return { userId, quota, isVerifiedPro };
+}
+
 /**
  * Monetization Guardrail Middleware:
- * Checks remaining monthly free cleans, token pack balance, and Pro subscription status
+ * Checks remaining monthly free cleans and verified Pro subscription status
  * BEFORE triggering the Gemini AI & file-processing pipeline.
  */
 export function checkCleanQuota(req: GuardedRequest, res: Response, next: NextFunction): void {
-  const userId = resolveUserId(req);
-  getOrCreateUser(userId);
-  const quota = getUserQuotaSnapshot(userId);
+  const { userId, quota, isVerifiedPro } = resolveAuthoritativeQuota(req);
 
   req.docuUserId = userId;
   req.quotaSnapshot = quota;
+  req.isVerifiedPro = isVerifiedPro;
 
-  if (!quota.canProcessNewFile) {
+  const canProcess = isVerifiedPro || quota.freeCleansUsedThisMonth < FREE_MONTHLY_CLEAN_LIMIT;
+  if (!canProcess) {
     res.status(402).json({
-      error: `Free tier monthly limit reached (${quota.freeCleansUsedThisMonth}/${FREE_MONTHLY_CLEAN_LIMIT} cleans used in ${quota.billingCycleMonth}). Upgrade to Pro or purchase a 15-clean Token Pack to continue.`,
+      error: 'MONTHLY_LIMIT_REACHED',
       code: 'MONTHLY_LIMIT_REACHED',
+      requiredPlan: 'pro',
+      message: `Free tier monthly limit reached (${quota.freeCleansUsedThisMonth}/${FREE_MONTHLY_CLEAN_LIMIT} cleans used in ${quota.billingCycleMonth}). Upgrade to Pro ($40/mo) to continue.`,
       upgradeRequired: true,
       quota,
     });
@@ -46,21 +88,24 @@ export function checkCleanQuota(req: GuardedRequest, res: Response, next: NextFu
 
 /**
  * Secondary Guardrail invoked right after tabular extraction and BEFORE calling Gemini:
- * Ensures Free-tier uploads stay within the 50-row file cap.
+ * Strictly rejects any dataset >50 rows with HTTP 402 unless an authenticated,
+ * verified Paddle Pro subscription token is present.
  */
 export function enforceRowLimit(
   quota: QuotaSnapshot,
-  rowCount: number
+  rowCount: number,
+  isVerifiedPro = false
 ): { allowed: true } | { allowed: false; status: number; payload: Record<string, unknown> } {
-  // Pro subscribers and Token Pack holders bypass the 50-row Free tier cutoff
-  const hasPaidAllowance = quota.plan === 'pro' || quota.tokenBalance > 0;
-  if (!hasPaidAllowance && rowCount > FREE_MAX_ROWS_PER_FILE) {
+  const hasVerifiedProAccess = isVerifiedPro && quota.plan === 'pro';
+  if (!hasVerifiedProAccess && rowCount > FREE_MAX_ROWS_PER_FILE) {
     return {
       allowed: false,
       status: 402,
       payload: {
-        error: `This file contains ${rowCount} rows, which exceeds the Free tier cap of ${FREE_MAX_ROWS_PER_FILE} rows per file. Upgrade to Pro ($40/mo) or a $5 Token Pack for unlimited rows.`,
+        error: 'ROW_LIMIT_EXCEEDED',
         code: 'ROW_LIMIT_EXCEEDED',
+        requiredPlan: 'pro',
+        message: `Upgrade to Pro ($40/mo) to process ledgers over ${FREE_MAX_ROWS_PER_FILE} rows. This file contains ${rowCount} rows.`,
         upgradeRequired: true,
         rowCount,
         quota,
@@ -71,20 +116,37 @@ export function enforceRowLimit(
 }
 
 /**
- * Guardrail Middleware for Pro export formats (XLSX with audit sheet, Executive Summary PDF)
+ * Guardrail Middleware for Pro export formats (XLSX workbooks, Pre-Audit PDF & Certificate PDF).
+ * Rejects with HTTP 402 unless user has plan === 'pro' AND a verified Paddle subscription token.
  */
 export function requireProExport(req: GuardedRequest, res: Response, next: NextFunction): void {
-  const userId = resolveUserId(req);
-  const quota = getUserQuotaSnapshot(userId);
+  const { userId, quota, isVerifiedPro } = resolveAuthoritativeQuota(req);
   req.docuUserId = userId;
   req.quotaSnapshot = quota;
+  req.isVerifiedPro = isVerifiedPro;
 
-  const format = typeof req.params.format === 'string' ? req.params.format.toLowerCase() : 'csv';
+  const paramFormat = typeof req.params.format === 'string' ? req.params.format.toLowerCase() : '';
+  const pathLower = req.path.toLowerCase();
+  const format =
+    paramFormat ||
+    (pathLower.endsWith('/xlsx')
+      ? 'xlsx'
+      : pathLower.endsWith('/pdf')
+      ? 'pdf'
+      : pathLower.endsWith('/certificate')
+      ? 'certificate'
+      : 'csv');
 
-  if ((format === 'xlsx' || format === 'pdf') && !quota.canExportProFormats) {
+  const isProFormat = format === 'xlsx' || format === 'pdf' || format === 'certificate';
+  if (isProFormat && !isVerifiedPro) {
     res.status(402).json({
-      error: `${format.toUpperCase()} export is a Pro & Token Pack feature. Upgrade to unlock clean XLSX workbooks and Executive Summary PDF reports.`,
+      error: 'PRO_EXPORT_LOCKED',
       code: 'PRO_EXPORT_LOCKED',
+      requiredPlan: 'pro',
+      message:
+        format === 'xlsx'
+          ? 'Upgrade to Pro ($40/mo) to export multi-tab Executive XLSX workbooks.'
+          : 'Upgrade to Pro ($40/mo) to export Pre-Audit Processing Report PDFs.',
       upgradeRequired: true,
       format,
       quota,
@@ -94,3 +156,4 @@ export function requireProExport(req: GuardedRequest, res: Response, next: NextF
 
   next();
 }
+

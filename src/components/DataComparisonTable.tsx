@@ -12,6 +12,7 @@ import type { CellDiff, CleanJob, QuotaSnapshot } from '../types';
 interface DataComparisonTableProps {
   job: CleanJob;
   quota: QuotaSnapshot | null;
+  isPro: boolean;
   onExport: (jobId: string, format: 'csv' | 'xlsx' | 'pdf') => void;
   exportingFormat: string | null;
 }
@@ -21,6 +22,7 @@ type TableViewMode = 'split' | 'cleaned' | 'schema';
 export function DataComparisonTable({
   job,
   quota,
+  isPro,
   onExport,
   exportingFormat,
 }: DataComparisonTableProps) {
@@ -30,7 +32,7 @@ export function DataComparisonTable({
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 100;
 
-  const proExportsUnlocked = quota?.canExportProFormats ?? false;
+  const proExportsUnlocked = isPro;
   const freeQuotaExhausted =
     !proExportsUnlocked &&
     (quota?.freeCleansUsedThisMonth ?? 0) >= (quota?.freeCleansLimit ?? 3);

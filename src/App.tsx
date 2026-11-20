@@ -109,6 +109,26 @@ export default function App() {
 
   const handleUploadFile = async (file: File) => {
     setBanner(null);
+
+    // Hard client-side guardrail: immediately block >50-row CSV datasets for Free users
+    if (!isPro && /\.csv$/i.test(file.name)) {
+      const text = await file.text().catch(() => '');
+      const nonEmptyLines = text
+        .replace(/^\uFEFF/, '')
+        .split(/\r?\n/)
+        .filter((line) => line.trim().length > 0);
+      const estimatedDataRows = Math.max(0, nonEmptyLines.length - 1);
+      const maxFreeRows = quota.freeRowLimit || 50;
+      if (estimatedDataRows > maxFreeRows) {
+        setPaywall({
+          open: true,
+          reason: `Upgrade to Pro ($40/mo) to process ledgers over ${maxFreeRows} rows. "${file.name}" contains ${estimatedDataRows} rows.`,
+          code: 'ROW_LIMIT_EXCEEDED',
+        });
+        return;
+      }
+    }
+
     setIsProcessing(true);
     setProcessingFileName(file.name);
     setActiveTab('workspace');
@@ -117,7 +137,7 @@ export default function App() {
       const data = await cleanUploadedFile(file);
       setActiveJob(data.job);
       setShowDropzone(false);
-      setQuota(data.quota);
+      setQuota(enforceVerifiedSubscriptionOnQuota(data.quota));
       setJobs((prev) => [data.job, ...prev.filter((j) => j.id !== data.job.id)]);
       setBanner({
         type: 'success',
@@ -126,7 +146,7 @@ export default function App() {
       await fetchAccountState();
     } catch (err) {
       if (err instanceof ApiBusinessError && (err.status === 402 || err.upgradeRequired)) {
-        if (err.quota) setQuota(err.quota);
+        if (err.quota) setQuota(enforceVerifiedSubscriptionOnQuota(err.quota));
         setPaywall({
           open: true,
           reason: err.message,
@@ -148,6 +168,16 @@ export default function App() {
   const handleRunSample = async (
     sample: 'expenses' | 'roster' | 'receipt' | 'oversized'
   ) => {
+    // Hard Guardrail on Preset Buttons: never process or load the 65-row dataset for Free users
+    if (sample === 'oversized' && !isPro) {
+      setPaywall({
+        open: true,
+        reason: 'Upgrade to Pro ($40/mo) to process ledgers over 50 rows.',
+        code: 'ROW_LIMIT_EXCEEDED',
+      });
+      return;
+    }
+
     try {
       const file =
         sample === 'receipt'
@@ -168,6 +198,19 @@ export default function App() {
   ) => {
     setBanner(null);
 
+    // Hard Export Action Guardrail: block XLSX and Pre-Audit PDF for Free users before generating anything
+    if ((format === 'xlsx' || format === 'pdf' || format === 'certificate') && !isPro) {
+      setPaywall({
+        open: true,
+        reason:
+          format === 'xlsx'
+            ? 'Upgrade to Pro ($40/mo) to export multi-tab Executive XLSX workbooks.'
+            : 'Upgrade to Pro ($40/mo) to export Pre-Audit Processing Report PDFs.',
+        code: 'PRO_EXPORT_LOCKED',
+      });
+      return;
+    }
+
     const targetJob =
       (activeJob?.id === jobId ? activeJob : jobs.find((j) => j.id === jobId)) || activeJob;
     if (!targetJob) {
@@ -176,15 +219,13 @@ export default function App() {
     }
 
     const freeExhausted =
-      !isPro &&
-      !quota.canExportProFormats &&
-      quota.freeCleansUsedThisMonth >= quota.freeCleansLimit;
+      !isPro && quota.freeCleansUsedThisMonth >= quota.freeCleansLimit;
 
     if (format === 'csv' && freeExhausted) {
       setPaywall({
         open: true,
         reason:
-          'You have reached your Free tier monthly limit. Upgrade to Pro ($40/mo) or grab a $5 Token Pack to continue exporting.',
+          'You have reached your Free tier monthly limit. Upgrade to Pro ($40/mo) to continue exporting.',
         code: 'EXPORT_LIMIT_REACHED',
       });
       return;
@@ -253,6 +294,7 @@ export default function App() {
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         quota={quota}
+        isPro={isPro}
         onOpenPaywall={(reason) => setPaywall({ open: true, reason })}
         onDemoQuotaMode={handleDemoQuotaMode}
         mobileOpen={mobileNavOpen}
@@ -316,6 +358,10 @@ export default function App() {
                     isProcessing={isProcessing}
                     processingFileName={processingFileName}
                     quota={quota}
+                    isPro={isPro}
+                    onRequireProUpgrade={(reason, code) =>
+                      setPaywall({ open: true, reason, code })
+                    }
                     compact={Boolean(activeJob) && !isProcessing}
                   />
                 )}
@@ -387,6 +433,7 @@ export default function App() {
 
                     <AnomalyCards
                       job={activeJob}
+                      isPro={isPro}
                       onExport={handleExport}
                       exportingFormat={exportingFormat}
                     />
@@ -399,6 +446,7 @@ export default function App() {
                       <DataComparisonTable
                         job={activeJob}
                         quota={quota}
+                        isPro={isPro}
                         onExport={handleExport}
                         exportingFormat={exportingFormat}
                       />
@@ -412,6 +460,7 @@ export default function App() {
               <HistoryView
                 jobs={jobs}
                 usageLogs={usageLogs}
+                isPro={isPro}
                 onOpenJob={(job) => {
                   setActiveJob(job);
                   setShowDropzone(false);
@@ -430,7 +479,7 @@ export default function App() {
                 quota={quota}
                 onOpenPaywall={(reason) => setPaywall({ open: true, reason })}
                 onQuotaUpdated={(nextQuota, message) => {
-                  setQuota(nextQuota);
+                  setQuota(enforceVerifiedSubscriptionOnQuota(nextQuota));
                   setBanner({ type: 'success', message });
                 }}
               />
@@ -447,7 +496,7 @@ export default function App() {
         quota={quota}
         onClose={() => setPaywall({ open: false, reason: '' })}
         onUpgradeComplete={(nextQuota, message) => {
-          setQuota(nextQuota);
+          setQuota(enforceVerifiedSubscriptionOnQuota(nextQuota));
           setBanner({ type: 'success', message });
         }}
       />

@@ -5,11 +5,15 @@ import {
   applySubscriptionCanceled,
   db,
   exhaustFreeQuotaForTesting,
-  getUserQuotaSnapshot,
   recordBillingAuditEvent,
   resetAccountToFreeForTesting,
 } from '../db.ts';
-import { resolveUserId } from '../middleware/monetization.ts';
+import {
+  getVerifiedPaddleToken,
+  resolveAuthoritativeQuota,
+  resolveUserId,
+  VALID_PADDLE_SUBSCRIPTION_TOKEN_RE,
+} from '../middleware/monetization.ts';
 
 export const billingRouter = express.Router();
 
@@ -248,14 +252,33 @@ billingRouter.post('/checkout', async (req, res) => {
 });
 
 /**
- * Completes a sandbox checkout directly (used in local preview/test mode)
+ * Completes a Paddle checkout sync ONLY when a verified Paddle subscription/transaction token is supplied.
  */
 billingRouter.post('/sandbox-complete', (req, res) => {
   const userId = resolveUserId(req);
-  const { plan = 'pro', provider = 'paddle' } = req.body as {
+  const { plan = 'pro', provider = 'paddle', paddleTokenId } = req.body as {
     plan?: 'pro' | 'token_pack';
     provider?: 'stripe' | 'paddle';
+    paddleTokenId?: string;
   };
+
+  const verifiedToken =
+    getVerifiedPaddleToken(req) ||
+    (typeof paddleTokenId === 'string' &&
+    VALID_PADDLE_SUBSCRIPTION_TOKEN_RE.test(paddleTokenId.trim())
+      ? paddleTokenId.trim()
+      : null);
+
+  if (!verifiedToken) {
+    res.status(402).json({
+      error: 'PAYMENT_VERIFICATION_REQUIRED',
+      code: 'PAYMENT_VERIFICATION_REQUIRED',
+      requiredPlan: 'pro',
+      message: 'A verified Paddle checkout transaction is required to activate Pro.',
+      upgradeRequired: true,
+    });
+    return;
+  }
 
   const amountCents = plan === 'pro' ? 4000 : 500;
   const eventType =
@@ -274,7 +297,13 @@ billingRouter.post('/sandbox-complete', (req, res) => {
     tier: plan,
     tokensToAdd: plan === 'token_pack' ? 15 : 0,
     amountCents,
-    payload: { mode: 'sandbox', plan, provider, timestamp: new Date().toISOString() },
+    payload: {
+      mode: 'verified_checkout',
+      plan,
+      provider,
+      paddleTokenId: verifiedToken,
+      timestamp: new Date().toISOString(),
+    },
   });
 
   res.json({
@@ -462,8 +491,7 @@ billingRouter.post('/webhook/stripe', (req, res) => {
  * Billing event audit log + sandbox testing controls (reset to Free / simulate exhausted quota)
  */
 billingRouter.get('/status', (req, res) => {
-  const userId = resolveUserId(req);
-  const quota = getUserQuotaSnapshot(userId);
+  const { userId, quota } = resolveAuthoritativeQuota(req);
   const events = db
     .prepare(
       `SELECT id, provider, event_type, plan_granted, amount_cents, created_at

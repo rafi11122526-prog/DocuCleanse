@@ -93,11 +93,18 @@ export function PaywallModal({
 
   const completeCheckoutSync = useCallback(
     async (plan: 'pro' | 'token_pack', verifiedPaddleTokenId?: string) => {
-      if (plan === 'pro') {
-        const tokenId = verifiedPaddleTokenId || `txn_paddle_${Date.now()}`;
-        saveVerifiedPaddleSubscriptionToken(tokenId);
+      const tokenId = (verifiedPaddleTokenId || '').trim();
+      if (!/^(sub_|txn_)[a-zA-Z0-9_-]{8,}$/.test(tokenId)) {
+        setError('Payment verification failed: missing verified Paddle transaction reference.');
+        setSubmitting(false);
+        return;
       }
-      const data = await completeSandboxCheckout({ plan, provider: 'paddle' });
+      saveVerifiedPaddleSubscriptionToken(tokenId);
+      const data = await completeSandboxCheckout({
+        plan,
+        provider: 'paddle',
+        paddleTokenId: tokenId,
+      });
       onUpgradeComplete(data.quota, data.message || 'Plan upgraded successfully.');
       onClose();
     },
@@ -130,7 +137,12 @@ export function PaywallModal({
               eventData?.subscription_id || eventData?.transaction_id || eventData?.id;
 
             void completeCheckoutSync(completedPlan, paddleVerifiedId).catch((err) => {
-              console.warn('[Paddle Post-Checkout Sync Notice]', err);
+              setError(
+                err instanceof Error
+                  ? err.message
+                  : 'Unable to verify Paddle subscription. Please try again.'
+              );
+              setSubmitting(false);
             });
             return;
           }
@@ -146,31 +158,10 @@ export function PaywallModal({
             Boolean(nestedError) ||
             Boolean(event.code)
           ) {
-            const activePriceId =
-              selectedPlanRef.current === 'pro'
-                ? PADDLE_PRO_PRICE_ID
-                : PADDLE_TOKEN_PACK_PRICE_ID;
-
-            console.warn('[Paddle Checkout Notice]', {
-              eventName,
-              environment: PADDLE_ENV,
-              priceId: activePriceId,
-              code: event.code,
-              detail: event.detail,
-            });
-
             try {
               paddleRef.current?.Checkout.close();
             } catch {
               // Ignore close errors if overlay already closed
-            }
-
-            if (PADDLE_ENV === 'sandbox') {
-              void completeCheckoutSync(selectedPlanRef.current).catch(() => {
-                setError('Checkout could not be initialized. Please try again in a moment.');
-                setSubmitting(false);
-              });
-              return;
             }
 
             const detail =
@@ -178,7 +169,7 @@ export function PaywallModal({
               (nestedError && typeof nestedError === 'object' && 'detail' in nestedError
                 ? String((nestedError as { detail?: unknown }).detail || '')
                 : '') ||
-              'Checkout could not be initialized. Please try again in a moment.';
+              'Paddle checkout could not be initialized. Please verify your Paddle configuration and try again.';
 
             setError(detail);
             setSubmitting(false);
@@ -192,12 +183,7 @@ export function PaywallModal({
         return instance;
       }
       return null;
-    } catch (err) {
-      console.error('[Paddle Initialize Error]', {
-        environment: PADDLE_ENV,
-        hasToken: hasValidPaddleToken,
-        error: err,
-      });
+    } catch {
       return null;
     }
   }, [hasValidPaddleToken, completeCheckoutSync]);
@@ -224,60 +210,51 @@ export function PaywallModal({
         provider: 'paddle',
       });
 
-      // If the server confirmed Paddle cannot create a transaction (e.g. missing Default Payment Link),
-      // do not blindly invoke Paddle.Checkout.open (which triggers a duplicate client error).
+      // Never auto-grant Pro if Paddle cannot create a checkout transaction
       if (session.paddleFallbackReason && !session.transactionId) {
-        if (session.sandboxMode || PADDLE_ENV === 'sandbox') {
-          await completeCheckoutSync(selectedPlan);
-          return;
-        }
-
         const guidance =
           session.paddleErrorCode === 'transaction_default_checkout_url_not_set'
             ? `Paddle checkout requires a Default Payment Link configured in your Paddle Dashboard (Checkout → Checkout Settings${
                 session.suggestedCheckoutUrl ? `, e.g. ${session.suggestedCheckoutUrl}` : ''
-              }).`
-            : session.paddleFallbackReason;
+              }). Payment is required before Pro access can be unlocked.`
+            : `${session.paddleFallbackReason} Payment is required before Pro access can be unlocked.`;
         setError(guidance);
         return;
       }
 
-      if (hasValidPaddleToken) {
-        const paddleInstance = await ensurePaddleInstance();
-        if (paddleInstance) {
-          const theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
-          try {
-            if (session.transactionId) {
-              paddleInstance.Checkout.open({
-                transactionId: session.transactionId,
-                settings: { displayMode: 'overlay', theme },
-              });
-            } else {
-              paddleInstance.Checkout.open({
-                items: [{ priceId, quantity: 1 }],
-                customData: {
-                  userId,
-                  plan: selectedPlan,
-                },
-                settings: { displayMode: 'overlay', theme },
-              });
-            }
-            setSubmitting(false);
-            return;
-          } catch {
-            if (session.sandboxMode || PADDLE_ENV === 'sandbox') {
-              await completeCheckoutSync(selectedPlan);
-              return;
-            }
-            setError('Unable to open the checkout overlay. Please try again.');
-            setSubmitting(false);
-            return;
-          }
-        }
+      if (!hasValidPaddleToken) {
+        setError(
+          'Paddle client token is not configured in this environment. Complete a verified Paddle checkout to unlock Pro ($40/mo).'
+        );
+        return;
       }
 
-      // Graceful fallback when client token is not configured in the current environment
-      await completeCheckoutSync(selectedPlan);
+      const paddleInstance = await ensurePaddleInstance();
+      if (!paddleInstance) {
+        setError('Unable to initialize Paddle checkout overlay. Please try again in a moment.');
+        return;
+      }
+
+      const theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+      try {
+        if (session.transactionId) {
+          paddleInstance.Checkout.open({
+            transactionId: session.transactionId,
+            settings: { displayMode: 'overlay', theme },
+          });
+        } else {
+          paddleInstance.Checkout.open({
+            items: [{ priceId, quantity: 1 }],
+            customData: {
+              userId,
+              plan: selectedPlan,
+            },
+            settings: { displayMode: 'overlay', theme },
+          });
+        }
+      } catch {
+        setError('Unable to open the Paddle checkout overlay. Please try again.');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Payment processing failed.');
     } finally {

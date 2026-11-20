@@ -24,6 +24,7 @@ export class NonJsonApiError extends Error {
 export class ApiBusinessError extends Error {
   status: number;
   code?: string;
+  requiredPlan?: string;
   upgradeRequired?: boolean;
   quota?: QuotaSnapshot;
 
@@ -31,15 +32,20 @@ export class ApiBusinessError extends Error {
     status: number,
     payload: {
       error?: string;
+      message?: string;
       code?: string;
+      requiredPlan?: string;
       upgradeRequired?: boolean;
       quota?: QuotaSnapshot;
     }
   ) {
-    super(payload.error || `Request failed with status ${status}`);
+    super(payload.message || payload.error || `Request failed with status ${status}`);
     this.name = 'ApiBusinessError';
     this.status = status;
-    this.code = payload.code;
+    this.code =
+      payload.code ||
+      (payload.error && /^[A-Z0-9_]+$/.test(payload.error) ? payload.error : undefined);
+    this.requiredPlan = payload.requiredPlan;
     this.upgradeRequired = payload.upgradeRequired;
     this.quota = payload.quota;
   }
@@ -58,7 +64,9 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
 
   const data = (await response.json()) as T & {
     error?: string;
+    message?: string;
     code?: string;
+    requiredPlan?: string;
     upgradeRequired?: boolean;
     quota?: QuotaSnapshot;
   };
@@ -181,9 +189,10 @@ export function clearAllProTokensFromStorage(): void {
 }
 
 export function enforceVerifiedSubscriptionOnQuota(quota: QuotaSnapshot): QuotaSnapshot {
-  if (quota.plan === 'pro' && !hasVerifiedPaddleSubscription()) {
-    const freeUsed = Math.max(0, Math.min(quota.freeCleansLimit || 3, quota.freeCleansUsedThisMonth || 0));
+  const verified = hasVerifiedPaddleSubscription();
+  if (!verified && (quota.plan !== 'free' || quota.tokenBalance > 0 || quota.canExportProFormats)) {
     const freeLimit = quota.freeCleansLimit || 3;
+    const freeUsed = Math.max(0, Math.min(freeLimit, quota.freeCleansUsedThisMonth || 0));
     const freeRemaining = Math.max(0, freeLimit - freeUsed);
     return {
       ...quota,
@@ -219,17 +228,17 @@ const mockState: {
 
 function syncMockQuotaFlags(): QuotaSnapshot {
   const q = mockState.quota;
-  if (q.plan === 'pro' && !hasVerifiedPaddleSubscription()) {
+  const verified = hasVerifiedPaddleSubscription();
+  if (!verified) {
     q.plan = 'free';
     q.tokenBalance = 0;
   }
   q.freeRowLimit = 50;
+  const isVerifiedPro = q.plan === 'pro' && verified;
   const freeRem = Math.max(0, q.freeCleansLimit - q.freeCleansUsedThisMonth);
-  q.remainingCleans =
-    q.plan === 'pro' ? 'unlimited' : q.tokenBalance > 0 ? freeRem + q.tokenBalance : freeRem;
-  q.canProcessNewFile =
-    q.plan === 'pro' || q.tokenBalance > 0 || q.freeCleansUsedThisMonth < q.freeCleansLimit;
-  q.canExportProFormats = q.plan === 'pro' || q.tokenBalance > 0;
+  q.remainingCleans = isVerifiedPro ? 'unlimited' : freeRem;
+  q.canProcessNewFile = isVerifiedPro || q.freeCleansUsedThisMonth < q.freeCleansLimit;
+  q.canExportProFormats = isVerifiedPro;
   return { ...q };
 }
 
@@ -640,12 +649,13 @@ async function runFallbackClean(file: File): Promise<{ job: CleanJob; quota: Quo
     rawHeaders = matrix[headerIdx].map((h, i) => (h.trim() ? h.trim() : `Column_${i + 1}`));
     const dataRows = matrix.slice(headerIdx + 1);
 
-    const hasPaidAllowance =
-      (quota.plan === 'pro' && hasVerifiedPaddleSubscription()) || quota.tokenBalance > 0;
-    if (!hasPaidAllowance && dataRows.length > quota.freeRowLimit) {
+    const isVerifiedPro = quota.plan === 'pro' && hasVerifiedPaddleSubscription();
+    if (!isVerifiedPro && dataRows.length > quota.freeRowLimit) {
       throw new ApiBusinessError(402, {
-        error: `This file contains ${dataRows.length} rows, which exceeds the Free tier cap of ${quota.freeRowLimit} rows per file. Upgrade to Pro ($40/mo) or a $5 Token Pack for unlimited rows.`,
+        error: 'ROW_LIMIT_EXCEEDED',
         code: 'ROW_LIMIT_EXCEEDED',
+        requiredPlan: 'pro',
+        message: `Upgrade to Pro ($40/mo) to process ledgers over ${quota.freeRowLimit} rows. This file contains ${dataRows.length} rows.`,
         upgradeRequired: true,
         quota,
       });
@@ -1157,8 +1167,11 @@ export async function fetchQuotaAndLogs(): Promise<{
     });
     const data = await parseJsonResponse<{ quota: QuotaSnapshot; usageLogs: UsageLog[] }>(res);
 
-    // Do not auto-grant Pro on load unless a verified active Paddle subscription token exists
-    if (data.quota.plan === 'pro' && !verifiedToken) {
+    // Do not auto-grant Pro or Pro exports on load unless a verified active Paddle subscription token exists
+    if (
+      (data.quota.plan !== 'free' || data.quota.tokenBalance > 0 || data.quota.canExportProFormats) &&
+      !verifiedToken
+    ) {
       clearAllProTokensFromStorage();
       mockState.quota = createDefaultFreeQuota();
       void fetch('/api/billing/demo-state', {
@@ -1203,17 +1216,25 @@ export async function fetchJobs(): Promise<{ jobs: CleanJob[] }> {
 export async function cleanUploadedFile(
   file: File
 ): Promise<{ job: CleanJob; quota: QuotaSnapshot }> {
+  const verifiedToken = getVerifiedPaddleSubscriptionToken();
   try {
     const formData = new FormData();
     formData.append('file', file);
 
     const res = await fetch('/api/clean', {
       method: 'POST',
-      headers: { 'x-user-id': DEMO_USER_ID },
+      headers: {
+        'x-user-id': DEMO_USER_ID,
+        ...(verifiedToken ? { 'x-paddle-subscription-token': verifiedToken } : {}),
+      },
       body: formData,
     });
 
-    return await parseJsonResponse<{ job: CleanJob; quota: QuotaSnapshot }>(res);
+    const data = await parseJsonResponse<{ job: CleanJob; quota: QuotaSnapshot }>(res);
+    return {
+      ...data,
+      quota: enforceVerifiedSubscriptionOnQuota(data.quota),
+    };
   } catch (err) {
     if (shouldUseMockFallback(err)) {
       return runFallbackClean(file);
@@ -1226,16 +1247,22 @@ export async function downloadExportFile(
   job: CleanJob,
   format: 'csv' | 'xlsx' | 'pdf' | 'certificate'
 ): Promise<{ blob: Blob; fileName: string }> {
+  const verifiedToken = getVerifiedPaddleSubscriptionToken();
   try {
     const res = await fetch(`/api/export/${job.id}/${format}`, {
-      headers: { 'x-user-id': DEMO_USER_ID },
+      headers: {
+        'x-user-id': DEMO_USER_ID,
+        ...(verifiedToken ? { 'x-paddle-subscription-token': verifiedToken } : {}),
+      },
     });
 
     const contentType = res.headers.get('content-type') || '';
     if (contentType.toLowerCase().includes('application/json')) {
       const payload = (await res.json()) as {
         error?: string;
+        message?: string;
         code?: string;
+        requiredPlan?: string;
         upgradeRequired?: boolean;
         quota?: QuotaSnapshot;
       };
@@ -1268,12 +1295,18 @@ export async function downloadExportFile(
       throw err;
     }
 
-    // Fallback export generation
+    // Fallback export generation — strictly block XLSX, PDF, and Pre-Audit Certificate for Free users
     const quota = syncMockQuotaFlags();
-    if ((format === 'xlsx' || format === 'pdf') && !quota.canExportProFormats) {
+    const isVerifiedPro = quota.plan === 'pro' && hasVerifiedPaddleSubscription();
+    if ((format === 'xlsx' || format === 'pdf' || format === 'certificate') && !isVerifiedPro) {
       throw new ApiBusinessError(402, {
-        error: `${format.toUpperCase()} export requires Pro or a Token Pack.`,
+        error: 'PRO_EXPORT_LOCKED',
         code: 'PRO_EXPORT_LOCKED',
+        requiredPlan: 'pro',
+        message:
+          format === 'xlsx'
+            ? 'Upgrade to Pro ($40/mo) to export multi-tab Executive XLSX workbooks.'
+            : 'Upgrade to Pro ($40/mo) to export Pre-Audit Processing Report PDFs.',
         upgradeRequired: true,
         quota,
       });
@@ -1568,51 +1601,33 @@ export async function createCheckoutSession(params: {
 export async function completeSandboxCheckout(params: {
   plan: 'pro' | 'token_pack';
   provider: 'stripe' | 'paddle';
+  paddleTokenId: string;
 }): Promise<{ ok: boolean; quota: QuotaSnapshot; message: string }> {
-  try {
-    const res = await fetch('/api/billing/sandbox-complete', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-user-id': DEMO_USER_ID,
-      },
-      body: JSON.stringify(params),
+  const trimmedToken = (params.paddleTokenId || '').trim();
+  if (!VALID_PADDLE_SUBSCRIPTION_ID_RE.test(trimmedToken)) {
+    throw new ApiBusinessError(402, {
+      error: 'PAYMENT_VERIFICATION_REQUIRED',
+      code: 'PAYMENT_VERIFICATION_REQUIRED',
+      requiredPlan: 'pro',
+      message: 'A verified Paddle checkout transaction is required to activate Pro.',
+      upgradeRequired: true,
     });
-    return await parseJsonResponse<{ ok: boolean; quota: QuotaSnapshot; message: string }>(res);
-  } catch (err) {
-    if (shouldUseMockFallback(err)) {
-      if (params.plan === 'pro') {
-        mockState.quota.plan = 'pro';
-      } else {
-        mockState.quota.plan = mockState.quota.plan === 'pro' ? 'pro' : 'token_pack';
-        mockState.quota.tokenBalance += 15;
-      }
-      mockState.billingEvents.unshift({
-        id: `evt_local_${Date.now()}`,
-        provider: params.provider,
-        event_type:
-          params.provider === 'paddle'
-            ? params.plan === 'pro'
-              ? 'subscription.activated'
-              : 'transaction.completed'
-            : params.plan === 'pro'
-            ? 'checkout.session.completed'
-            : 'token_pack.purchased',
-        plan_granted: params.plan,
-        amount_cents: params.plan === 'pro' ? 4000 : 500,
-        created_at: new Date().toISOString(),
-      });
-      return {
-        ok: true,
-        quota: syncMockQuotaFlags(),
-        message:
-          params.plan === 'pro'
-            ? `Upgraded to DocuCleanse Pro ($40/mo) via ${params.provider === 'paddle' ? 'Paddle' : 'Stripe'}.`
-            : `Added 15 Pro-grade tokens ($5 Token Pack) via ${params.provider === 'paddle' ? 'Paddle' : 'Stripe'}.`,
-      };
-    }
-    throw err;
   }
+
+  const res = await fetch('/api/billing/sandbox-complete', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-user-id': DEMO_USER_ID,
+      'x-paddle-subscription-token': trimmedToken,
+    },
+    body: JSON.stringify({
+      plan: params.plan,
+      provider: params.provider,
+      paddleTokenId: trimmedToken,
+    }),
+  });
+  return await parseJsonResponse<{ ok: boolean; quota: QuotaSnapshot; message: string }>(res);
 }
 
 export async function fetchBillingStatus(): Promise<{
@@ -1682,67 +1697,26 @@ export async function dispatchTestWebhook(
     provider === 'stripe' ? '/api/billing/webhook/stripe' : '/api/billing/webhook/paddle';
   const p = payload as {
     event_type?: string;
-    data?: {
-      custom_data?: { plan?: 'pro' | 'token_pack'; tier?: 'pro' | 'token_pack' };
-      object?: { metadata?: { tier?: 'pro' | 'token_pack' } };
-    };
   };
 
   if (provider === 'paddle' && p?.event_type === 'subscription.canceled') {
     clearAllProTokensFromStorage();
-  } else if (
-    provider === 'paddle' &&
-    (p?.event_type === 'subscription.activated' || p?.event_type === 'subscription.created')
-  ) {
-    saveVerifiedPaddleSubscriptionToken(`sub_paddle_${Date.now()}`);
   }
 
-  try {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    return await parseJsonResponse<{
-      received: boolean;
-      provider: string;
-      processedEvent?: string;
-      quota: QuotaSnapshot;
-    }>(res);
-  } catch (err) {
-    if (shouldUseMockFallback(err)) {
-      if (provider === 'paddle' && p?.event_type === 'subscription.canceled') {
-        clearAllProTokensFromStorage();
-        mockState.quota.plan = mockState.quota.tokenBalance > 0 ? 'token_pack' : 'free';
-        mockState.billingEvents.unshift({
-          id: `evt_local_${Date.now()}`,
-          provider: 'paddle',
-          event_type: 'subscription.canceled',
-          plan_granted: 'free',
-          amount_cents: 0,
-          created_at: new Date().toISOString(),
-        });
-        return {
-          received: true,
-          provider,
-          processedEvent: 'subscription.canceled',
-          quota: syncMockQuotaFlags(),
-        };
-      }
-
-      const tier =
-        p?.data?.custom_data?.plan ||
-        p?.data?.custom_data?.tier ||
-        p?.data?.object?.metadata?.tier ||
-        'pro';
-      const result = await completeSandboxCheckout({ plan: tier, provider });
-      return {
-        received: true,
-        provider,
-        processedEvent: p?.event_type,
-        quota: result.quota,
-      };
-    }
-    throw err;
-  }
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{
+    received: boolean;
+    provider: string;
+    processedEvent?: string;
+    quota: QuotaSnapshot;
+  }>(res);
+  return {
+    ...data,
+    quota: enforceVerifiedSubscriptionOnQuota(data.quota),
+  };
 }
+

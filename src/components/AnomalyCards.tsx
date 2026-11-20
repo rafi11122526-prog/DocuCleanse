@@ -7,12 +7,14 @@ import {
   Copy,
   FileCheck2,
   FileSignature,
+  Lock,
   ShieldCheck,
 } from 'lucide-react';
 import type { AnomalySeverity, CleanJob } from '../types';
 
 interface AnomalyCardsProps {
   job: CleanJob;
+  isPro?: boolean;
   onExport?: (jobId: string, format: 'csv' | 'xlsx' | 'pdf' | 'certificate') => void;
   exportingFormat?: string | null;
 }
@@ -53,7 +55,12 @@ function formatDisplayUtc(value: string): string {
   return `${dt.toISOString().replace('T', ' ').slice(0, 19)} UTC`;
 }
 
-export function AnomalyCards({ job, onExport, exportingFormat }: AnomalyCardsProps) {
+export function AnomalyCards({
+  job,
+  isPro = false,
+  onExport,
+  exportingFormat,
+}: AnomalyCardsProps) {
   const [severityFilter, setSeverityFilter] = useState<'all' | AnomalySeverity>('all');
   const [copiedHash, setCopiedHash] = useState(false);
 
@@ -309,8 +316,17 @@ export function AnomalyCards({ job, onExport, exportingFormat }: AnomalyCardsPro
                 disabled={exportingFormat !== null && exportingFormat !== undefined}
                 onClick={() => onExport(job.id, 'certificate')}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 dark:bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0 disabled:opacity-60"
+                title={
+                  isPro
+                    ? 'Download Pre-Audit Processing Report PDF'
+                    : 'Locked on Free tier — Upgrade to Pro ($40/mo) to download Pre-Audit PDF reports'
+                }
               >
-                <FileSignature className="h-3.5 w-3.5 shrink-0" />
+                {isPro ? (
+                  <FileSignature className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <Lock className="h-3.5 w-3.5 text-amber-300 shrink-0" />
+                )}
                 <span>
                   {exportingFormat === 'certificate'
                     ? 'Generating Report PDF...'

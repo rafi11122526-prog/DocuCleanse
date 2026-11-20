@@ -15,6 +15,7 @@ interface SidebarProps {
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
   quota: QuotaSnapshot | null;
+  isPro: boolean;
   onOpenPaywall: (reason: string) => void;
   onDemoQuotaMode: (mode: 'reset_free' | 'exhaust_free') => void;
   mobileOpen: boolean;
@@ -25,6 +26,7 @@ export function Sidebar({
   activeTab,
   onSelectTab,
   quota,
+  isPro,
   onOpenPaywall,
   onDemoQuotaMode,
   mobileOpen,
@@ -38,10 +40,9 @@ export function Sidebar({
 
   const freeUsed = quota?.freeCleansUsedThisMonth ?? 0;
   const freeLimit = quota?.freeCleansLimit ?? 3;
-  const progressPct =
-    quota?.plan === 'pro'
-      ? 100
-      : Math.min(100, Math.round((freeUsed / Math.max(1, freeLimit)) * 100));
+  const progressPct = isPro
+    ? 100
+    : Math.min(100, Math.round((freeUsed / Math.max(1, freeLimit)) * 100));
 
   const content = (
     <div className="flex h-full flex-col justify-between bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 px-4 py-5">
@@ -95,27 +96,19 @@ export function Sidebar({
         <div className="space-y-2.5 px-1">
           <div className="flex items-center justify-between text-xs">
             <span className="font-semibold text-slate-900 dark:text-slate-100">
-              {quota?.plan === 'pro'
-                ? 'Pro Subscription'
-                : quota?.tokenBalance && quota.tokenBalance > 0
-                ? 'Token Pack Active'
-                : 'Free Tier'}
+              {isPro ? 'Pro Subscription' : 'Free Tier'}
             </span>
             <span className="font-mono tabular-nums text-slate-500 dark:text-slate-400">
-              {quota?.plan === 'pro'
-                ? 'Unlimited'
-                : quota?.tokenBalance && quota.tokenBalance > 0
-                ? `${quota.tokenBalance} tokens`
-                : `${freeUsed}/${freeLimit} used`}
+              {isPro ? 'Unlimited' : `${freeUsed}/${freeLimit} used`}
             </span>
           </div>
 
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
             <div
               className={`h-full transition-all duration-200 ${
-                quota?.plan === 'pro'
+                isPro
                   ? 'bg-emerald-600'
-                  : freeUsed >= freeLimit && (quota?.tokenBalance ?? 0) === 0
+                  : freeUsed >= freeLimit
                   ? 'bg-red-600'
                   : 'bg-blue-600'
               }`}
@@ -124,19 +117,17 @@ export function Sidebar({
           </div>
 
           <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-            {quota?.plan === 'pro'
+            {isPro
               ? 'Unlimited rows, XLSX workbooks & PDF reports enabled.'
-              : quota?.tokenBalance && quota.tokenBalance > 0
-              ? 'Pro exports & unlimited rows enabled via Token Pack.'
               : `Up to ${quota?.freeRowLimit ?? 50} rows/file · CSV export`}
           </p>
 
-          {quota?.plan !== 'pro' && (
+          {!isPro && (
             <button
               type="button"
               onClick={() =>
                 onOpenPaywall(
-                  'Unlock unlimited file cleans, 50+ row spreadsheets, XLSX workbooks, and Executive Summary PDFs.'
+                  'Unlock unlimited file cleans, 50+ row spreadsheets, XLSX workbooks, and Pre-Audit Processing Report PDFs.'
                 )
               }
               className="mt-1 flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700 whitespace-nowrap shrink-0"
